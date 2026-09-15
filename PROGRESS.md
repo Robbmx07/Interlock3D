@@ -13,6 +13,12 @@
 | 7 | Calibration wizard (v1.1) | **Done** |
 | 8 | Packaging | **Done for Linux; Windows/Mac unvalidated** |
 
+A separate **Web Reimplementation Track** (browser/JS, no install) was
+started after Phase 8, at the user's request for a no-install way to try
+the tool. See its own status table further down — it does not replace
+or supersede the Python desktop app above, which remains the primary,
+complete product.
+
 ## Phase 1 — Scaffold + load & view STL
 
 **Done.**
@@ -1083,7 +1089,7 @@ Linux one has actually been tested.
   on every `pytest` invocation the way the fast unit/integration tests
   do.
 
-## Next up
+## Next up (Python desktop app)
 
 **All 8 phases are done for Linux.** Nothing else is planned unless you
 want: (a) the Windows/Mac builds actually produced and tested (needs
@@ -1091,3 +1097,163 @@ those platforms directly), (b) an app icon, (c) code-signing for
 distribution (a separate, paid-certificate process on both platforms),
 or (d) something new. This file will be updated once any of those
 happen.
+
+---
+
+# Web Reimplementation Track
+
+Started after Python Phase 8, at the user's explicit request (asked for
+an HTML version "so I don't have to install it," then confirmed — after
+being shown the tradeoff explicitly — that they wanted a full
+reimplementation of the pipeline in the browser, not just a quick static
+viewer). This is a **separate, parallel effort**, not a replacement: the
+Python desktop app above is the complete, primary product this whole
+project was built around. The web version exists because "no install"
+is a real, different value proposition, not because the desktop app is
+lacking.
+
+Developed the same way as the Python app: one phase at a time, real
+validation before calling a phase done, stop and report back rather than
+plowing ahead. The phase breakdown mirrors the original 8 (view → detect
+→ pair → compensate → modify geometry → export → calibrate → "package"),
+adapted for a browser environment where "package" doesn't apply the same
+way (there's no install step to package — the page itself already runs
+anywhere).
+
+## Status overview
+
+| Phase | Description | Status |
+|---|---|---|
+| W1 | Load & view STL | **Done** |
+| W2 | Feature detection | Not started |
+| W3 | Feature pairing UI | Not started |
+| W4 | Compensation engine | Not started |
+| W5 | Geometry modification | Not started |
+| W6 | Export & report | Not started |
+| W7 | Calibration wizard | Not started |
+
+## Phase W1 — Load & view STL
+
+**Done.**
+
+### What was built
+
+Single self-contained HTML file (`web/viewer.html`, also published as a
+Claude Artifact: https://claude.ai/artifact/7WfUs7CACk7Yxhz4RxbYtH) — no
+build step, no server, opens directly in any WebGL2-capable browser.
+
+- **A hand-written STL parser** (binary + ASCII), not a library. Binary
+  format detected by checking whether the declared triangle count
+  (bytes 80-83) makes the file exactly the expected size
+  (`84 + triCount*50`); falls back to regex-based ASCII parsing
+  (`facet normal ... outer loop ... vertex ...`) otherwise.
+- **A hand-written WebGL2 renderer** — no three.js or any other 3D
+  library. Own `mat4Perspective`/`mat4LookAt`/`mat4Multiply` (small,
+  standard column-major implementations), own orbit/pan/zoom camera
+  (spherical coordinates around a target point, Z-up to match the
+  print-bed convention the Python app and its STL fixtures already
+  use), own flat-shaded lighting shader (key + fill directional lights
+  plus ambient, no external lighting model).
+- **A print-bed reference grid** rendered under the loaded parts, sized
+  and spaced to the current scene's bounding box — both a visual anchor
+  and a literal nod to the actual print bed these files are headed for.
+- **Two bundled example parts**: the exact same `plate_with_matched_hole.stl`
+  / `boss_cylinder.stl` pair the Python app's Phase 5 used to validate
+  hole+peg compensation, embedded as base64 and auto-loaded on open (so
+  the page shows real, meaningful geometry immediately rather than an
+  empty canvas), clearly labeled "example" in the parts list. Loading
+  the user's own file(s) works via drag-and-drop or a file picker,
+  same as the desktop app.
+- Visual design: a considered "workshop instrument" identity (Big
+  Shoulders for the wordmark, IBM Plex Sans/Mono for UI and numeric
+  readouts, a warm-orange/steel-blue accent pair evoking heated
+  filament vs. precision measurement) rather than a default/generic
+  look, with a proper light and dark theme (not just an inverted
+  palette) and a bottom "DRO-style" numeric readout strip (part count,
+  triangle count, bounding box in mm) echoing a digital caliper's
+  readout, on-theme for an FDM tolerancing tool.
+
+### Why no three.js (or any 3D library)
+
+The Artifact runtime only allows loading external scripts from a small,
+fixed set of hosts (cdnjs, jsdelivr, the Tailwind play CDN, jquery's
+CDN), each at an exact pinned version path. This session's sandboxed
+Bash tool cannot reach those hosts to verify an exact, currently-valid
+URL (confirmed directly: a `curl` to `cdnjs.cloudflare.com` was rejected
+by the environment's own egress proxy with a 403 policy denial) — and
+guessing a version path wrong means the published page fails outright
+for the user with no fallback, for a library used only for two features
+(triangle rendering + orbit camera) that are straightforward to
+implement directly. Writing a small, self-contained renderer instead
+removes that failure mode entirely, and — as a genuine side benefit, not
+the main motivation — means the page keeps working fully offline after
+the first load (no runtime CDN fetch at all, just two Google Fonts
+`<link>` tags), which is a closer echo of the original desktop app's
+"nothing leaves your machine" pitch than a CDN-dependent page would be.
+
+### Validation
+
+No browser is available in this session to actually render and look at
+the page (no Playwright/browser-automation tool, and this dev container
+otherwise has no display). Validated everything that *could* be checked
+without one, rather than skipping validation entirely:
+
+- **Extracted and ran the actual embedded parsing code** (not a
+  reimplementation — the real `parseSTL`/`parseBinarySTL`/`computeBounds`
+  functions, pulled verbatim from the published file) in Node against
+  the real embedded base64 example data, and confirmed both examples
+  decode to exactly the expected real-world dimensions: the hole plate
+  to a 40.00 × 40.00 × 5.00mm bounding box with 512 triangles, the peg
+  cylinder to 12.00 × 12.00 × 15.00mm with 256 triangles — matching the
+  Python side's own known values for these exact fixture files (r=20mm
+  disk / r=6mm×h=15mm cylinder) and its previously-logged triangle
+  counts for them.
+- `node --check` on the full extracted script confirmed it's
+  syntactically valid JavaScript (would have caught a typo the way a
+  Python `py_compile` check would, though it can't catch a runtime or
+  WebGL-specific bug the way actually rendering the page would).
+- The camera/projection math (`mat4Perspective`, `mat4LookAt`,
+  `mat4Multiply`) is a direct, standard column-major implementation
+  (the same structure widely used in e.g. glMatrix) rather than
+  something novel — lower risk than hand-derived math, but still
+  unverified by actual rendering.
+
+**Not validated: whether the page actually renders correctly in a real
+browser.** This is a real gap, flagged rather than glossed over — the
+parsing logic and matrix math are checked, but WebGL shader compilation,
+the lighting result, and the orbit/pan/zoom feel have not been seen
+rendered by anyone, including me. Asking you to open the published
+Artifact link and report back what you see (or don't) is the
+validation this phase is still missing.
+
+### Key decisions and why
+
+- **Z-up world convention**, matching the Python app's STL fixtures and
+  the physical print-bed convention (bed = XY plane, nozzle travels up
+  in Z) — not the Y-up convention common in general-purpose 3D engines
+  (including three.js's default), which would have been a subtle,
+  confusing mismatch for files meant to represent real 3D prints.
+- **Example parts reused directly from the Python project's own test
+  fixtures**, not new placeholder geometry — ties the web track back to
+  geometry that's already been rigorously validated (Phase 2's exact
+  radius detection, Phase 5's exact compensation math) rather than
+  introducing an unrelated demo shape.
+- **No pytest-equivalent test suite for the web track (yet).** The
+  Python project's whole testing discipline (pytest, Xvfb-driven GUI
+  tests) doesn't carry over directly to a browser artifact. Once later
+  web phases add real logic worth regression-testing (feature detection
+  in JS, compensation math), worth revisiting whether a headless-browser
+  test setup is warranted — flagged as an open question, not decided
+  here.
+
+## Next up (Web track)
+
+Phase W2 — feature detection in JS: port the segmentation (dihedral-angle
+region growing) and cylinder/plane classification approach from
+`interlock3d/core/feature_detection.py`, without a RANSAC library
+(browser has no `pyransac3d` equivalent readily available under the same
+CDN constraints described above) — likely a direct least-squares or
+simple-RANSAC implementation written by hand, same reasoning as W1's
+renderer. **Waiting for go-ahead, and — importantly — for confirmation
+that W1 actually renders correctly for you first**, before building
+further phases on top of an unverified foundation.

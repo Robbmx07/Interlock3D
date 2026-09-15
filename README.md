@@ -311,3 +311,13 @@ spot).
 See the phase list in `PROGRESS.md`. **All 8 phases are done** for
 Linux; Windows and Mac builds still need validating on those platforms
 directly (not possible from this Linux dev environment).
+
+## Web version (no install)
+
+A separate, parallel browser-based rebuild — not a replacement for the
+desktop app above, started because "no install" is a genuinely different
+ask. See `web/README.md`. Phase 1 (load & view STL) is live:
+https://claude.ai/artifact/7WfUs7CACk7Yxhz4RxbYtH — **not yet confirmed
+to render correctly by anyone**, since this dev environment has no
+browser to check it in; see `PROGRESS.md`'s "Web Reimplementation Track"
+section for what was and wasn't validated.
