@@ -5,7 +5,7 @@
 | Phase | Description | Status |
 |---|---|---|
 | 1 | Scaffold + load & view STL | **Done** |
-| 2 | Feature detection engine | Not started |
+| 2 | Feature detection engine | **Done** |
 | 3 | Feature pairing UI | Not started |
 | 4 | Compensation engine | Not started |
 | 5 | Geometry modification | Not started |
@@ -93,8 +93,173 @@ by "already decided" (e.g. numpy 2.x, pyvista 0.49). Nothing in Phase 1
 exercised any breaking API surface, but worth keeping an eye on as Phase 2
 starts using more of trimesh's mesh-query API and pyransac3d gets added.
 
+## Phase 2 — Feature detection engine
+
+**Done.**
+
+### What was built
+
+- `interlock3d.core.segmentation.segment_smooth_patches(mesh, angle_threshold_deg)`:
+  partitions a mesh's faces into patches of smoothly-connected surface.
+  Builds the face-adjacency graph trimesh already computes
+  (`face_adjacency` / `face_adjacency_angles`), keeps only edges whose
+  dihedral angle is below the threshold, and finds connected components
+  with `scipy.sparse.csgraph.connected_components`. This is what lets a
+  tessellated cylindrical wall (small angle between adjacent panels) stay
+  in one patch while cleanly breaking at the sharp edge where a hole or
+  boss meets a surrounding flat face (measured at exactly 90° for a
+  straight bore/boss).
+- `interlock3d.core.feature_detection.detect_features(mesh, config)`: for
+  each patch above a minimum size, classifies it and — for accepted
+  patches — fits the actual primitive with `pyransac3d`:
+  - **Flat**: patch's face normals are all nearly parallel → fit a
+    `pyransac3d.Plane`; reject if the fit's inlier ratio is low.
+  - **Cylindrical**: normals aren't parallel but are confined to the plane
+    perpendicular to some axis (checked via the eigenvalues of the
+    normals' second-moment matrix — a cylinder's face normals sweep
+    around its axis, so they have one near-zero eigenvalue whose
+    eigenvector *is* the axis) → fit a `pyransac3d.Cylinder` using that
+    axis to seed a scale-appropriate RANSAC inlier threshold.
+    - **Hole vs. peg**: for each face in the patch, compare its normal to
+      the radial direction (patch centroid → axis). Normals pointing
+      outward (positive dot product) → convex → `"peg"`; pointing inward
+      → concave → `"hole"`.
+    - Rejects fits with low inlier ratio, radius outside a configured
+      range, or angular coverage around the axis below 180° (filters out
+      fillets/partial rounds, which aren't real mating holes/pegs).
+  - Anything that's neither (fillets, freeform curvature, spheres, cones)
+    is left unclassified and simply doesn't appear in the output — no
+    forced guess.
+  - Output per feature: `feature_type`, `center`, `axis`, `radius`,
+    `extent` (depth/height along axis), `area`, plus `fit_residual` and
+    `inlier_ratio` for downstream confidence display.
+- `tests/known_parts.py`: generates the hand-made, known-dimension test
+  STLs the brief calls for, each paired with its exact expected feature
+  list (type, radius, extent, area, with tolerances):
+  - `flat_plate.stl` — 40×40×5mm box (6 known flat faces).
+  - `plate_with_hole.stl` — disk (r=20mm) with a concentric r=5mm
+    (⌀10mm) through-hole, via `trimesh.creation.annulus` (exact primitive,
+    no boolean ops needed).
+  - `boss_cylinder.stl` — free-standing r=6mm, h=15mm cylinder.
+  - `plate_with_boss.stl` — the 40×40×5mm plate with a r=6mm boss
+    positioned 1mm embedded / 15mm exposed, to test a multi-region
+    assembly rather than an isolated primitive.
+- `scripts/validate_phase2.py`: generates the known parts, runs
+  detection, greedily matches detected features to expected ones, and
+  prints a numeric pass/fail report (radius/extent/area error per
+  feature). Exit code doubles as a CI gate.
+- `tests/test_feature_detection.py`: pytest versions of the same checks,
+  plus rotation-invariance and a pinned low-tessellation limitation test
+  (see below), so `pytest` catches regressions without reading a report.
+
+### Validation results (numeric, not vibes)
+
+Ran `python scripts/validate_phase2.py` against all 4 known parts:
+
+```
+TOTAL: 22/22 expected features matched (100.0%), 0 unexpected detections
+```
+
+Every matched feature's radius and extent error was **0.0000mm** (exact,
+to floating-point precision) on the generated (high-tessellation, 64
+sections) fixtures; area errors were at most ~1.9mm² out of ~1178mm²
+(<0.2%), which is polygon-discretization error in the fixture geometry
+itself, not a detector error. Also spot-checked and confirmed correct
+(see `pytest` suite):
+- **Rotation invariance**: a boss cylinder rotated to a random arbitrary
+  3D orientation and translated is still detected with radius/extent
+  accurate to <0.05mm — confirms the algorithm isn't implicitly relying
+  on axis-aligned geometry.
+- **Multi-feature assembly**: a plate with 6 bosses of different radii
+  (3–8mm) all detected with exact radius/extent recovery, in ~1.3s with
+  the tuned RANSAC iteration count (500 — dropped from an initial default
+  of 2000 after confirming accuracy was unaffected on this data; see
+  `DetectionConfig.ransac_max_iterations`).
+- **Hole vs. peg convexity**: confirmed on `plate_with_hole` — the
+  concave through-hole reads as `"hole"`, the disk's own convex outer rim
+  reads as `"peg"` (a convex cylindrical surface, not a functional peg —
+  see trade-off note below).
+
+### Key decisions and why
+
+- **Segment first by dihedral angle, then classify by normal
+  distribution, then fit with `pyransac3d`.** This is a 3-stage pipeline
+  rather than one omnibus RANSAC pass because `pyransac3d` fits *one*
+  primitive to a point cloud — it doesn't segment a mixed mesh into
+  regions on its own. Segmentation has to come first; PCA-style
+  classification (flat vs. cylindrical) narrows down *which* primitive to
+  even attempt fitting, so we're not blindly trying a cylinder fit on
+  every patch.
+- **Classify cylindrical vs. flat from face-normal distribution, not
+  curvature directly.** A patch's face normals for a true cylindrical
+  wall are confined to the plane perpendicular to the axis; the smallest
+  eigenvalue of their second-moment matrix and its eigenvector give a
+  robust, closed-form axis estimate to seed RANSAC with — cheaper and
+  more reliable than trying blind RANSAC cylinder fits on every patch
+  indiscriminately.
+- **Convexity by radial-direction vs. normal-direction dot product**,
+  majority vote weighted by face area. Simple, and it's exactly the
+  physical definition of concave (hole) vs. convex (peg) — no
+  primitive-specific special-casing needed.
+- **Known-dimension fixtures built from exact primitives
+  (`box`/`cylinder`/`annulus`), not boolean CAD operations.** trimesh
+  needs an external boolean backend (e.g. `manifold3d`) to actually drill
+  a hole into a solid via CSG subtraction, which isn't installed. Using
+  `annulus` for the hole test gives an *exact*, analytically-known hole
+  radius/depth without that dependency. The trade-off: `plate_with_boss`
+  is built by concatenating a box and a cylinder with the boss embedded
+  1mm into the plate (not boolean-unioned), so the assembly isn't a
+  single watertight solid — two separate touching/interpenetrating
+  shells. That's fine for Phase 2, which only needs identifiable surface
+  patches, not global manifoldness (that's explicitly a Phase 5 concern
+  per the brief). **Open question for later:** if Phase 5's real-world
+  test parts need actual boolean-drilled/fused geometry (closer to what a
+  real CAD export looks like), we'll want a boolean mesh library —
+  `manifold3d` is the natural pick (MIT-licensed, small, trimesh's
+  current recommended backend) but it's a new dependency, so I'm flagging
+  it rather than adding it now.
+
+### Known limitation (surfaced, not silently patched around)
+
+**Low-tessellation cylinders aren't detected.** The segmentation
+threshold (`smooth_angle_deg`, default 35°) has to draw a line between
+"these adjacent panels are one smooth cylindrical wall" and "these are
+genuinely separate flat faces." Below ~16 sides per circle (panel angle
+>35°, e.g. an 8-sided approximation of a round hole), each panel gets
+read as its own separate flat facet instead of merging into one cylinder
+— pinned as `test_low_tessellation_cylinder_is_a_known_limitation` so
+this stays a deliberate, visible trade-off rather than a silent gap.
+Mainstream slicers/CAD tools default to 24–64+ segments per circle for
+STL export, so this shouldn't bite on typical real-world files, but very
+low-poly or hand-optimized meshes could slip through undetected. The
+threshold is a config value (`DetectionConfig.smooth_angle_deg`), tunable
+without code changes if this turns out to matter in practice.
+
+**Two reasonable defaults chosen without a strictly "correct" answer —
+flagging per the working agreement:**
+- `min_arc_degrees = 180`: a cylindrical patch needs at least half its
+  circumference present to count as a hole/peg (filters out fillets and
+  partial rounds). A tighter value (e.g. 270°) would filter more
+  aggressively but risks rejecting genuinely truncated holes/bosses (e.g.
+  a peg cut off by a nearby wall). Current value is a middle ground, not
+  a strong claim.
+- `min_inlier_ratio = 0.8`: how tolerant the fit-quality gate is. Higher
+  is stricter (fewer false positives, more missed noisy real-world
+  features); lower is more permissive. All test fixtures here are
+  noise-free synthetic geometry, so this threshold is untested against
+  real scanned/noisy STLs — worth revisiting once real user files are in
+  the loop.
+
+### Open questions / not blocking
+
+- `manifold3d` (boolean ops) — see above; only needed if/when Phase 5
+  wants true CAD-realistic fused test geometry.
+- `min_inlier_ratio` and `min_arc_degrees` defaults are reasonable guesses,
+  not empirically tuned against real (non-synthetic) STLs yet.
+
 ## Next up
 
-Phase 2 — feature detection engine (cylindrical holes/pegs, flat mating
-faces via `pyransac3d`), validated numerically against a hand-made set of
-known-dimension test STLs. **Waiting for go-ahead before starting.**
+Phase 3 — feature pairing UI: extend the Phase 1 viewer so detected
+features are visibly highlighted and clickable, let the user click a
+feature on Part A then the corresponding one on Part B, confirm a pair,
+and pick a fit type. **Waiting for go-ahead before starting.**

@@ -11,7 +11,12 @@ dependencies = [
     "pyvistaqt>=0.11",
     "trimesh>=4.0",
     "numpy>=1.26",
+    "scipy>=1.11",
+    "pyransac3d>=0.6",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
 
 [project.scripts]
 interlock3d = "interlock3d.main:main"
@@ -22,3 +27,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
