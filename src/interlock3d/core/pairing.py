@@ -31,3 +31,15 @@ class FeaturePair:
 
     def involves(self, ref: FeatureRef) -> bool:
         return ref == self.a or ref == self.b
+
+
+def are_types_compatible(feature_type_a: str, feature_type_b: str) -> bool:
+    """Whether two feature types can be meaningfully paired for a mating fit.
+
+    Only hole+peg (a cylindrical feature inserting into another) and
+    flat+flat (two faces meant to sit flush) correspond to an actual
+    physical mating relationship; anything else (hole+hole, peg+peg,
+    hole+flat, peg+flat) doesn't have a sensible compensation to compute.
+    """
+    types = {feature_type_a, feature_type_b}
+    return types == {"hole", "peg"} or (feature_type_a == "flat" and feature_type_b == "flat")

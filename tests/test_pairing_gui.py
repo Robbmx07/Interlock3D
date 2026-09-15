@@ -65,6 +65,19 @@ def _find_feature(window: MainWindow, part_name: str, feature_type: str):
     raise AssertionError(f"no {feature_type} feature found on {part_name}")
 
 
+def _find_upward_flat(window: MainWindow, part_name: str):
+    """The flat feature facing +Z -- reliably visible under the default
+    iso camera. A part typically has 2 flats of equal area (top/bottom),
+    so picking "the first flat" isn't reliably the visible one; this
+    picks by normal direction instead."""
+    candidates = [
+        (i, f) for i, f in enumerate(window._part_features[part_name]) if f.feature_type == "flat"
+    ]
+    if not candidates:
+        raise AssertionError(f"no flat feature found on {part_name}")
+    return max(candidates, key=lambda pair: pair[1].axis[2])
+
+
 def _visible_point(window: MainWindow, part_name: str, feature) -> np.ndarray:
     """A point on the feature's surface facing the current camera. The
     feature's own `.center` is an axis point for cylinders -- often not on
@@ -171,14 +184,19 @@ def test_clicking_selected_feature_again_deselects(two_part_window) -> None:
 
 
 def test_two_features_on_different_parts_form_a_pair(two_part_window) -> None:
+    # flat+flat is the only physically valid combination that's also
+    # trivially visible under the default camera (peg+peg, used here in
+    # earlier drafts, is convex-vs-convex and easy to click, but Phase 4's
+    # are_types_compatible() correctly rejects it -- a rim and a boss
+    # wall aren't a real mating pair).
     boss_name = "boss_offset"
     window = two_part_window
-    rim_idx, rim_feat = _find_feature(window, "plate_with_hole", "peg")
-    peg_idx, peg_feat = _find_feature(window, boss_name, "peg")
+    top_idx, top_feat = _find_upward_flat(window, "plate_with_hole")
+    cap_idx, cap_feat = _find_upward_flat(window, boss_name)
 
-    _simulate_click(window, _visible_point(window, "plate_with_hole", rim_feat))
+    _simulate_click(window, _visible_point(window, "plate_with_hole", top_feat))
     QTimer.singleShot(150, _accept_active_modal)
-    _simulate_click(window, _visible_point(window, boss_name, peg_feat))
+    _simulate_click(window, _visible_point(window, boss_name, cap_feat))
     _qapp.processEvents()
 
     assert window._pending is None
@@ -186,11 +204,11 @@ def test_two_features_on_different_parts_form_a_pair(two_part_window) -> None:
     pair = window._pairs[0]
     assert pair.fit_type == "sliding"
 
-    rim_actor = window.viewer._feature_actors[("plate_with_hole", rim_idx)]
-    peg_actor = window.viewer._feature_actors[(boss_name, peg_idx)]
-    assert rim_actor.prop.color.hex_rgb == peg_actor.prop.color.hex_rgb
-    assert rim_actor.prop.color.hex_rgb.lower() not in (
-        feature_colors.default_color("peg").lower(),
+    top_actor = window.viewer._feature_actors[("plate_with_hole", top_idx)]
+    cap_actor = window.viewer._feature_actors[(boss_name, cap_idx)]
+    assert top_actor.prop.color.hex_rgb == cap_actor.prop.color.hex_rgb
+    assert top_actor.prop.color.hex_rgb.lower() not in (
+        feature_colors.default_color("flat").lower(),
         feature_colors.SELECTED_COLOR.lower(),
     )
     assert window.pairs_list.count() == 1
@@ -199,12 +217,12 @@ def test_two_features_on_different_parts_form_a_pair(two_part_window) -> None:
 def test_removing_a_pair_reverts_colors(two_part_window) -> None:
     boss_name = "boss_offset"
     window = two_part_window
-    rim_idx, rim_feat = _find_feature(window, "plate_with_hole", "peg")
-    peg_idx, peg_feat = _find_feature(window, boss_name, "peg")
+    top_idx, top_feat = _find_upward_flat(window, "plate_with_hole")
+    cap_idx, cap_feat = _find_upward_flat(window, boss_name)
 
-    _simulate_click(window, _visible_point(window, "plate_with_hole", rim_feat))
+    _simulate_click(window, _visible_point(window, "plate_with_hole", top_feat))
     QTimer.singleShot(150, _accept_active_modal)
-    _simulate_click(window, _visible_point(window, boss_name, peg_feat))
+    _simulate_click(window, _visible_point(window, boss_name, cap_feat))
     _qapp.processEvents()
     assert len(window._pairs) == 1
 
@@ -212,10 +230,10 @@ def test_removing_a_pair_reverts_colors(two_part_window) -> None:
     window._remove_selected_pair()
 
     assert len(window._pairs) == 0
-    rim_actor = window.viewer._feature_actors[("plate_with_hole", rim_idx)]
-    peg_actor = window.viewer._feature_actors[(boss_name, peg_idx)]
-    assert rim_actor.prop.color.hex_rgb.lower() == feature_colors.default_color("peg").lower()
-    assert peg_actor.prop.color.hex_rgb.lower() == feature_colors.default_color("peg").lower()
+    top_actor = window.viewer._feature_actors[("plate_with_hole", top_idx)]
+    cap_actor = window.viewer._feature_actors[(boss_name, cap_idx)]
+    assert top_actor.prop.color.hex_rgb.lower() == feature_colors.default_color("flat").lower()
+    assert cap_actor.prop.color.hex_rgb.lower() == feature_colors.default_color("flat").lower()
 
 
 def test_second_click_on_same_part_is_rejected(two_part_window) -> None:
@@ -230,5 +248,34 @@ def test_second_click_on_same_part_is_rejected(two_part_window) -> None:
     _qapp.processEvents()
 
     assert len(window._pairs) == 0
+    assert window._pending is not None, "pending selection should be kept, not silently dropped"
+    assert window._pending.feature_index == rim_idx
+
+
+def test_incompatible_feature_types_on_different_parts_rejected(two_part_window) -> None:
+    """A peg and a flat face are on different parts (so the same-part
+    check doesn't apply) but can't be meaningfully paired -- Phase 4's
+    compensation engine only knows how to handle hole+peg or flat+flat.
+    This should be rejected before the fit-type dialog even opens.
+
+    Deliberately uses the rim (peg) and a cap (flat) rather than the
+    concave hole: whether a point on a concave surface is even visible
+    depends on the camera angle (for any 3D viewer, not just ours), so
+    it's not something to fight in a click simulation -- peg and flat are
+    both convex/planar and reliably visible from the default iso camera.
+    """
+    boss_name = "boss_offset"
+    window = two_part_window
+    rim_idx, rim_feat = _find_feature(window, "plate_with_hole", "peg")
+    cap_idx, cap_feat = _find_upward_flat(window, boss_name)
+
+    _simulate_click(window, _visible_point(window, "plate_with_hole", rim_feat))
+    assert window._pending is not None
+    assert window._pending.feature_index == rim_idx
+
+    _simulate_click(window, _visible_point(window, boss_name, cap_feat))
+    _qapp.processEvents()
+
+    assert len(window._pairs) == 0, "peg+flat must not form a pair"
     assert window._pending is not None, "pending selection should be kept, not silently dropped"
     assert window._pending.feature_index == rim_idx

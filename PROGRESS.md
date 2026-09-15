@@ -7,7 +7,7 @@
 | 1 | Scaffold + load & view STL | **Done** |
 | 2 | Feature detection engine | **Done** |
 | 3 | Feature pairing UI | **Done** |
-| 4 | Compensation engine | Not started |
+| 4 | Compensation engine | **Done** |
 | 5 | Geometry modification | Not started |
 | 6 | Export & report | Not started |
 | 7 | Calibration wizard (v1.1) | Not started |
@@ -398,10 +398,134 @@ the constructor doesn't help — a fatal Qt abort isn't a Python exception.
 Confirmed both paths: clean skip with no display, full pass under
 `xvfb-run`.
 
+## Phase 4 — Compensation engine
+
+**Done.**
+
+### What was built
+
+- `data/compensation_profiles.json`: the config-driven lookup table the
+  brief called for (not hardcoded). Per material (PLA, PETG, ABS) × fit
+  type (press, sliding, clearance): a `clearance_per_side_mm` value plus
+  the `clearance_range_mm` it was chosen from, and a top-level `notes`
+  field documenting where the numbers came from (see below). PLA's values
+  are exactly the brief's own rough starting numbers (press 0.05–0.10,
+  sliding 0.20–0.30, clearance 0.40–0.50); PETG and ABS are widened from
+  that baseline.
+- `core/compensation.py`:
+  - `CompensationTable.load()` reads the JSON file (default path, or an
+    explicit override for testing/future custom profiles) and exposes
+    `materials()`, `fit_types()`, `get_clearance_mm()`,
+    `get_clearance_range_mm()` — all raising a clear `CompensationError`
+    for an unknown material or fit type rather than a raw `KeyError`.
+  - `compute_pair_compensation(pair, feature_type_a, feature_type_b,
+    material, split_ratio=0.5)` — the actual "given a confirmed pair,
+    compute the offset" the brief asked for. Returns a `PairCompensation`
+    with `total_clearance_mm` (the target gap) and two `FeatureAdjustment`s
+    (one per feature in the pair).
+  - Every `FeatureAdjustment.material_removed_mm` is **always
+    non-negative** — direction is implied by `feature_type` rather than
+    encoded as a sign (hole: added to radius; peg: subtracted from
+    radius; flat: recessed inward along its own normal). All three are
+    the same underlying operation ("remove material in the direction that
+    widens the gap") described in feature-appropriate terms, which is
+    exactly what Phase 5 will need to know to move the right vertices in
+    the right direction — chose this over a signed-delta convention
+    specifically to avoid the reader having to remember "positive means
+    different things for a hole vs. a peg."
+  - Only **hole+peg** and **flat+flat** pairs are computable —
+    `are_types_compatible()` (added to `core/pairing.py`, not
+    `compensation.py`, since it's about pair *validity* generally, not
+    specifically about compensation) rejects hole+hole, peg+peg,
+    hole+flat, peg+flat with a clear `CompensationError`.
+- **Small fix to Phase 3's pairing UI, motivated directly by this
+  phase**: `MainWindow` now calls `are_types_compatible()` before opening
+  the fit-type dialog, and rejects an incompatible second click with a
+  status-bar message instead of letting the user create a pair that
+  Phase 4 (or Phase 6's report) would later have nothing sensible to do
+  with. This wasn't caught in Phase 3 because none of that phase's tests
+  happened to pair two features of incompatible types — worth noting as
+  a gap in Phase 3's own test coverage that Phase 4's stricter validation
+  surfaced, not something Phase 3 got structurally wrong.
+
+### Validation
+
+- `tests/test_compensation.py`: 19 pytest cases. Confirms PLA's values
+  match the brief's stated ranges exactly; confirms press < sliding <
+  clearance and PLA < PETG < ABS ordering hold for all fit
+  types/materials; confirms a hole+peg pair's two adjustments always sum
+  to exactly the target clearance (both the default 50/50 split and a
+  custom skewed split); confirms pair order doesn't matter (hole+peg
+  gives the same per-type adjustment as peg+hole); confirms flat+flat
+  always splits 50/50 regardless of `split_ratio` (no physical basis to
+  weight one face over the other); confirms every incompatible type
+  combination raises `CompensationError`.
+- Extended `tests/test_pairing_gui.py` with a case pairing a peg and a
+  flat on different parts (ruling out the same-part rejection as the
+  cause) and confirming it's rejected before the fit-type dialog opens.
+  **This broke two existing Phase 3 tests** that paired plate_with_hole's
+  outer rim (a convex cylindrical surface, type `"peg"`) with
+  boss_cylinder's peg — a peg+peg combination, which was never a
+  physically valid pair, just a Phase 3 testing convenience chosen for
+  being easy to click reliably. Fixed by switching those two tests to
+  pair flat+flat instead (equally reliable to click, and actually valid)
+  — a genuine, caught-by-testing correction rather than a hypothetical
+  one.
+- Full suite: 38/38 pass under `xvfb-run pytest` (12 Phase 2 + 19 Phase 4
+  + 7 Phase 3); 31 pass + 1 module skipped (GUI tests) without a display.
+
+### Key decisions and why
+
+- **`material_removed_mm` always non-negative, direction from
+  `feature_type`.** Covered above — avoids sign-convention ambiguity
+  across three different feature types.
+- **50/50 default split between hole and peg, configurable via
+  `split_ratio`.** There's no calibration data yet to justify correcting
+  one feature more than the other (a hole undersizing and a peg
+  oversizing are both known FDM tendencies, but by how much varies per
+  printer — exactly what Phase 7's calibration wizard exists to measure).
+  Splitting evenly is the least-assumption default; `split_ratio` exists
+  so a future phase (or an advanced user) can bias it without redesigning
+  the function. **Flagging as a real design decision, not the only
+  reasonable one**: an equally defensible alternative is putting 100% of
+  the clearance on the hole (many maker-community tips are phrased as
+  "add 0.2mm to your hole diameter," leaving pegs at nominal), which is
+  simpler to reason about but arbitrarily privileges one feature. Went
+  with the symmetric default; easy to revisit once real print data
+  exists.
+- **PETG/ABS values are reasoned estimates, not measured data — said so
+  directly in the JSON file itself**, not just in this doc. The
+  directional reasoning (PETG oozier → needs more room; ABS shrinks more
+  → needs more room) is standard, well-known FDM material behavior, but I
+  have no per-material measurement study backing the *exact* numbers
+  chosen. Treating this as settled would misrepresent confidence I don't
+  have; Phase 7 existing as "replace generic defaults with your printer's
+  measured behavior" is the intended fix, not something to fake now.
+- **Compensation engine stays backend-only this phase — no material
+  picker added to the GUI.** Consistent with how Phase 2 (detection) was
+  backend-only until Phase 3 wired it into the UI: a material selector
+  belongs naturally in Phase 5, when it's actually needed to invoke this
+  engine and modify real geometry, rather than added speculatively now
+  with nothing yet consuming its value.
+
+### Known limitation / open question (surfaced, not silently resolved)
+
+**Flat+flat clearance semantics are less battle-tested than hole+peg.**
+Published FDM tolerancing guidance (including the brief's own numbers)
+is almost entirely about circular hole/peg fits; "recess each flat face
+inward along its normal by half the clearance value" is a reasonable,
+internally-consistent generalization I made, not something drawn from an
+established reference the way the cylindrical case is. It behaves
+correctly and predictably (validated numerically), but if flat-face
+mating turns out to matter a lot in practice, the underlying clearance
+*values* (same table as hole/peg) might deserve their own dedicated
+tuning rather than inheriting hole/peg numbers.
+
 ## Next up
 
-Phase 4 — compensation engine: a config-driven lookup table of
-clearance/interference values by material and fit type, computing the
-actual per-pair offset to apply. `core/pairing.FeaturePair` (part +
-feature + fit type) is already the shape Phase 4 needs to consume.
+Phase 5 — geometry modification: apply each `FeatureAdjustment` to the
+actual mesh (enlarge a hole / shrink a peg / recess a flat face) by
+moving the relevant vertices, without corrupting the rest of the model.
+Validate watertightness/manifoldness on the hand-made test set, per the
+brief. This is the phase that will need a material picker in the GUI.
 **Waiting for go-ahead before starting.**

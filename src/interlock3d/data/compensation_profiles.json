@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "notes": [
+    "Values are radial/normal clearance per side, in mm, applied per the",
+    "brief's rough starting values (PLA row matches them directly): press",
+    "0.05-0.10, sliding 0.20-0.30, clearance 0.40-0.50.",
+    "PETG and ABS are widened from the PLA baseline based on known material",
+    "behavior (PETG: stickier/oozier, more prone to mating parts fusing if",
+    "too tight; ABS: higher shrinkage and warping tendency than PLA/PETG),",
+    "not from independently verified per-material measurements -- these are",
+    "reasoned starting estimates, not calibrated data. Phase 7's calibration",
+    "wizard is the intended mechanism for replacing these generic defaults",
+    "with values measured on a specific printer."
+  ],
+  "materials": {
+    "PLA": {
+      "press": {"clearance_per_side_mm": 0.075, "clearance_range_mm": [0.05, 0.10]},
+      "sliding": {"clearance_per_side_mm": 0.25, "clearance_range_mm": [0.20, 0.30]},
+      "clearance": {"clearance_per_side_mm": 0.45, "clearance_range_mm": [0.40, 0.50]}
+    },
+    "PETG": {
+      "press": {"clearance_per_side_mm": 0.105, "clearance_range_mm": [0.08, 0.13]},
+      "sliding": {"clearance_per_side_mm": 0.30, "clearance_range_mm": [0.25, 0.35]},
+      "clearance": {"clearance_per_side_mm": 0.50, "clearance_range_mm": [0.45, 0.55]}
+    },
+    "ABS": {
+      "press": {"clearance_per_side_mm": 0.125, "clearance_range_mm": [0.10, 0.15]},
+      "sliding": {"clearance_per_side_mm": 0.33, "clearance_range_mm": [0.28, 0.38]},
+      "clearance": {"clearance_per_side_mm": 0.53, "clearance_range_mm": [0.48, 0.58]}
+    }
+  }
+}

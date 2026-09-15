@@ -20,6 +20,12 @@ This repo is being built in phases — see `PROGRESS.md` for current status.
   click the matching feature on a *different* part, choose a fit type,
   and confirm the pair. Pairs list in the side panel; select a row to
   remove it or change its fit type.
+- **Phase 4** (compensation engine): done, backend only — not wired into
+  the GUI yet (no material picker; that's natural to add in Phase 5 when
+  it's actually needed to drive geometry modification). Given a confirmed
+  pair, a material, and its fit type, `compute_pair_compensation()` looks
+  up a clearance value from a JSON profile table and returns how much to
+  grow/shrink each feature.
 
 ## Project layout
 
@@ -31,7 +37,10 @@ src/interlock3d/
     segmentation.py         # mesh -> smooth-surface patches
     feature_detection.py    # patches -> Feature list (holes/pegs/flats)
     features.py              # Feature dataclass
-    pairing.py                # FeatureRef / FeaturePair data model
+    pairing.py                # FeatureRef / FeaturePair data model + type-compatibility check
+    compensation.py            # material/fit-type clearance lookup + per-pair offset computation
+  data/
+    compensation_profiles.json # PLA/PETG/ABS x press/sliding/clearance clearance table
   gui/
     main_window.py         # main window: toolbar, part/pairs lists, pairing workflow
     viewer.py                # embedded PyVista QtInteractor: rendering + picking
@@ -44,6 +53,7 @@ tests/
   known_parts.py           # hand-made, known-dimension test STL generator
   test_feature_detection.py # Phase 2 pytest regression suite
   test_pairing_gui.py       # Phase 3 pytest suite (real VTK-driven click simulation)
+  test_compensation.py      # Phase 4 pytest suite
 test_data/
   sample_*.stl             # Phase 1 smoke-test STLs
   known/                    # Phase 2 known-dimension validation STLs
@@ -72,6 +82,25 @@ Or run the pytest regression suite:
 ```bash
 pytest
 ```
+
+## Compensation engine (Phase 4)
+
+```python
+from interlock3d.core.compensation import compute_pair_compensation
+
+result = compute_pair_compensation(pair, "hole", "peg", material="PLA")
+print(result.total_clearance_mm)          # target radial gap, mm
+print(result.adjustment_a.material_removed_mm)  # >= 0, direction implied by feature_type
+print(result.adjustment_b.material_removed_mm)
+```
+
+`pair.fit_type` (set when the pair was confirmed in the UI) selects
+press/sliding/clearance; `material` selects PLA/PETG/ABS from
+`data/compensation_profiles.json`. Values only cover hole+peg and
+flat+flat pairs — anything else raises `CompensationError` (and the GUI
+already refuses to let you *create* an incompatible pair in the first
+place). This only computes numbers; applying them to mesh geometry is
+Phase 5.
 
 ## Setup
 
@@ -146,5 +175,5 @@ helper silently failed to resolve clicks on plain triangulated surfaces.
 
 ## Roadmap
 
-See the phase list in `PROGRESS.md`. Phase 4 (compensation engine) is
+See the phase list in `PROGRESS.md`. Phase 5 (geometry modification) is
 next, pending go-ahead.

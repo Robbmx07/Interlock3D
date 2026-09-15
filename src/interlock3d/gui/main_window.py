@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 from interlock3d.core.feature_detection import DetectionConfig, detect_features, feature_id_per_face
 from interlock3d.core.features import Feature
 from interlock3d.core.mesh_loader import MeshLoadError, feature_overlay_polydata, load_trimesh, trimesh_to_pyvista
-from interlock3d.core.pairing import FIT_TYPE_LABELS, FeaturePair, FeatureRef
+from interlock3d.core.pairing import FIT_TYPE_LABELS, FeaturePair, FeatureRef, are_types_compatible
 from interlock3d.gui import feature_colors
 from interlock3d.gui.fit_type_dialog import FitTypeDialog
 from interlock3d.gui.viewer import MeshViewer
@@ -201,6 +201,15 @@ class MainWindow(QMainWindow):
         if existing is not None:
             self.statusBar().showMessage(
                 f"That feature is already paired ({self._pair_label(existing)}).", 3000
+            )
+            return
+
+        pending_feature = self._part_features[self._pending.part_name][self._pending.feature_index]
+        if not are_types_compatible(pending_feature.feature_type, feature.feature_type):
+            self.statusBar().showMessage(
+                f"Can't pair a {pending_feature.feature_type} with a {feature.feature_type} "
+                "— only hole+peg or flat+flat make sense as a mating fit.",
+                4000,
             )
             return
 
