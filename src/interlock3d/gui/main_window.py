@@ -8,6 +8,7 @@ from pathlib import Path
 
 from PySide6.QtGui import QAction, QCloseEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QFileDialog,
     QHBoxLayout,
@@ -23,12 +24,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from interlock3d.core.compensation import CompensationError, CompensationTable
+from interlock3d.core.export import build_export_plan, export_plan, format_report
 from interlock3d.core.feature_detection import DetectionConfig, detect_features, feature_id_per_face
 from interlock3d.core.features import Feature
 from interlock3d.core.mesh_loader import MeshLoadError, feature_overlay_polydata, load_trimesh, trimesh_to_pyvista
 from interlock3d.core.pairing import FIT_TYPE_LABELS, FeaturePair, FeatureRef, are_types_compatible
 from interlock3d.gui import feature_colors
 from interlock3d.gui.fit_type_dialog import FitTypeDialog
+from interlock3d.gui.report_dialog import ReportDialog
 from interlock3d.gui.viewer import MeshViewer
 
 _OVERLAY_OFFSET_FRACTION = 0.0015
@@ -46,6 +50,7 @@ class MainWindow(QMainWindow):
         self._pairs: list[FeaturePair] = []
         self._pending: FeatureRef | None = None
         self._pair_color_cycle = itertools.cycle(feature_colors.PAIR_COLORS)
+        self._compensation_table = CompensationTable.load()
 
         self.viewer = MeshViewer(self)
         self.viewer.enable_feature_picking(self._on_feature_clicked)
@@ -105,6 +110,19 @@ class MainWindow(QMainWindow):
         reset_view_action = QAction("Reset View", self)
         reset_view_action.triggered.connect(self.viewer.reset_camera)
         toolbar.addAction(reset_view_action)
+
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel(" Material: "))
+        self.material_combo = QComboBox(self)
+        self.material_combo.addItems(self._compensation_table.materials())
+        default_index = self.material_combo.findText("PLA")
+        if default_index >= 0:
+            self.material_combo.setCurrentIndex(default_index)
+        toolbar.addWidget(self.material_combo)
+
+        export_action = QAction("Export Corrected STL(s)...", self)
+        export_action.triggered.connect(self.export_corrected)
+        toolbar.addAction(export_action)
 
     # -- Loading -----------------------------------------------------
 
@@ -284,6 +302,47 @@ class MainWindow(QMainWindow):
         pair.fit_type = dialog.selected_fit_type()
         self._refresh_pairs_list()
         self.pairs_list.setCurrentRow(row)
+
+    # -- Export -----------------------------------------------------
+
+    def export_corrected(self) -> None:
+        if not self._parts:
+            self.statusBar().showMessage("Nothing loaded to export.", 3000)
+            return
+
+        material = self.material_combo.currentText()
+        try:
+            plan = build_export_plan(
+                self._pairs, self._parts, self._part_features, material=material, table=self._compensation_table
+            )
+        except CompensationError as exc:
+            QMessageBox.critical(self, "Cannot compute compensation", str(exc))
+            return
+
+        if plan.has_integrity_problems:
+            problems = ", ".join(plan.problem_parts())
+            QMessageBox.critical(
+                self,
+                "Export blocked: geometry problem",
+                f"The requested fit produced invalid geometry for: {problems}.\n\n"
+                "This usually means a compensation value is too large for the feature's size "
+                "(e.g. shrinking a peg or growing a hole beyond what the surrounding part can "
+                "support). Try a smaller fit clearance, a different material, or check the "
+                "affected pair's fit type.\n\n"
+                f"{format_report(plan)}",
+            )
+            return
+
+        output_dir = QFileDialog.getExistingDirectory(self, "Choose export folder")
+        if not output_dir:
+            return
+
+        written = export_plan(plan, output_dir)
+        file_count = len(written) - 1  # exclude the report entry
+        self.statusBar().showMessage(f"Exported {file_count} STL(s) and a report to {output_dir}", 5000)
+
+        dialog = ReportDialog(self, format_report(plan))
+        dialog.exec()
 
     # -- Housekeeping -----------------------------------------------
 

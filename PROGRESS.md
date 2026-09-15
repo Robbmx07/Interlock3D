@@ -9,7 +9,7 @@
 | 3 | Feature pairing UI | **Done** |
 | 4 | Compensation engine | **Done** |
 | 5 | Geometry modification | **Done** |
-| 6 | Export & report | Not started |
+| 6 | Export & report | **Done** |
 | 7 | Calibration wizard (v1.1) | Not started |
 | 8 | Packaging | Not started |
 
@@ -656,14 +656,139 @@ until Phase 6.
   typical hole/peg-in-a-flat-face geometry, but noted here rather than
   silently assumed away.
 
+## Phase 6 — Export & report
+
+**Done.** This is the phase that connects everything: Phase 3's
+confirmed pairs, through Phase 4's compensation, through Phase 5's
+geometry modification, out to actual files a user can print. **With this
+phase done, the full MVP (Phases 1-6, per the brief's own framing) is
+complete end to end** — not just each phase's pieces individually.
+
+### What was built
+
+- `core/export.py`:
+  - `build_export_plan(pairs, parts, features_by_part, material,
+    split_ratio=0.5, table=None) -> ExportPlan`: for every confirmed
+    pair, computes its compensation (Phase 4) and groups the resulting
+    per-feature adjustments by part; applies each part's adjustments in
+    one `apply_feature_adjustments()` call (Phase 5) and runs
+    `check_mesh_integrity()` on the result. Parts with no pairs at all
+    are included as unchanged copies — the point is exporting a complete,
+    consistent assembly, not just the parts that happened to get modified.
+  - `ChangeRecord`: one feature's change in plain language (`"plate:
+    hole radius 5.000mm -> 5.250mm (+0.250mm) -- paired with boss's peg,
+    Sliding fit, PLA"`) — this is directly the "which feature, original
+    size, new size, why" the brief asked for.
+  - `format_report(plan) -> str`: the human-readable summary — every
+    `ChangeRecord`, plus each modified part's integrity status. Falls
+    back to a clear "no pairs confirmed, exported unmodified" message
+    when there's nothing to report, rather than an empty or confusing
+    output.
+  - `export_plan(plan, output_dir)`: writes one `{part}_corrected.stl`
+    per part (via `trimesh`'s own export) plus `compensation_report.txt`,
+    both to a chosen directory. Every file gets the `_corrected` suffix,
+    even an entirely unmodified part — so exporting into the same folder
+    the original inputs live in can never silently overwrite them.
+- GUI wiring (the "Apply Compensation" + material picker work flagged as
+  open in Phase 5's notes):
+  - A **Material** combo box on the toolbar (PLA/PETG/ABS, from
+    `CompensationTable.materials()`, defaulting to PLA).
+  - **Export Corrected STL(s)...** toolbar action: builds the plan for
+    the selected material; if `plan.has_integrity_problems`, blocks with
+    a `QMessageBox.critical` naming the affected part(s) and explaining
+    likely causes — **before** ever prompting for a save location. This
+    is the "surface integrity checks to the user" item flagged as open in
+    Phase 5's PROGRESS.md notes, now actually wired up rather than just
+    planned.
+  - Otherwise: a folder picker, then the files are written and a
+    `ReportDialog` (read-only, monospace `QTextEdit`) shows the same
+    report text that got written to disk.
+
+### Validation
+
+- `tests/test_export.py`: 8 pytest cases against the core pipeline —
+  no-pairs leaves parts unmodified; one pair produces exactly two
+  `ChangeRecord`s with the right original/new radii; the applied geometry
+  is actually valid and the modified mesh, re-detected, shows the
+  expected radius change; an artificially huge clearance is correctly
+  rejected (not silently swallowed) via the same `GeometryModificationError`
+  path Phase 5 already validated; the report text mentions every change
+  and the right material; `export_plan` writes exactly the expected files
+  and — checked by reloading the written STL from disk and re-detecting —
+  they actually reflect the modification, not just exist; and exporting
+  into the same directory as the known-part fixtures never overwrites an
+  original filename.
+- `tests/test_export_gui.py`: 4 pytest cases through the real
+  `MainWindow`, in the same style as Phase 3's picking tests (`QFileDialog`
+  and the report dialog's modal `exec()` are handled via monkeypatching /
+  a scheduled `QTimer` accept, not skipped): exporting with nothing loaded
+  never opens a dialog; exporting with no pairs writes unmodified files
+  whose report says so; a real click-confirmed pair, exported, produces
+  files that reload and show the expected larger hole; and — using a
+  hand-built `ExportPlan` with a deliberately invalid `MeshIntegrityReport`
+  to force the block path, since the real known parts don't happen to
+  break at any real material's clearance values — confirms the folder
+  picker is never shown and exactly one error dialog appears when there's
+  a geometry problem.
+- Manual end-to-end smoke test of the actual running app (screenshots
+  captured): loaded two parts, **switched the material picker to PETG**
+  (not the default), paired a hole and peg via real simulated clicks,
+  exported, and confirmed the written `compensation_report.txt` reflects
+  PETG's clearance value (0.30mm/side, not PLA's 0.25mm) — proving the
+  picker actually drives the calculation end to end, not just that a
+  hardcoded default flows through. Full report text and both
+  screenshots included in the session; both features' overlays correctly
+  shared one pair color, matching Phase 3's established behavior.
+- Full suite: 62/62 pass under `xvfb-run pytest` (14 Phase 2 + 19 Phase 4
+  + 7 Phase 3 + 10 Phase 5 + 8 + 4 new Phase 6); 51 pass + 2 GUI modules
+  skipped cleanly without a display.
+
+### Key decisions and why
+
+- **Unmodified parts are still exported (as unchanged copies), not
+  skipped.** The whole point is a ready-to-print *assembly* — a user
+  shouldn't have to remember which of their loaded files happened to get
+  geometry changes and manually track down the rest from wherever they
+  originally were.
+- **Integrity problems block the entire export, not just the affected
+  part.** Considered exporting the valid parts and skipping/warning about
+  the broken one, but a partial export of a multi-part assembly (some
+  parts corrected, one silently missing) seems more likely to cause a
+  confusing failed print than a clear upfront "fix this pair first."
+  Simpler to reason about; revisit if partial export turns out to matter
+  in practice.
+- **`_corrected` suffix on every exported file, unconditionally.** The
+  alternative (only modified parts get the suffix) would mean an
+  unmodified part's export filename exactly matches its original input
+  filename — a real risk of silently overwriting the source STL if a user
+  exports into the same folder they loaded from. Consistent suffixing
+  costs nothing and removes that risk entirely.
+- **Report is plain text, not JSON/HTML/PDF.** The brief calls for "a
+  human-readable summary" — plain text is the simplest thing that's
+  actually readable by a hobbyist without opening another tool, and it's
+  trivially both a file on disk and text to display in a dialog with no
+  extra rendering work. Worth reconsidering only if a future phase wants
+  something more structured (e.g. re-parsing the report programmatically,
+  which nothing currently does — `ExportPlan`/`ChangeRecord` are already
+  the structured form for any code that needs one).
+
+### Open item carried forward (not new, still not fully resolved)
+
+Phase 5 flagged that nothing bounds "how much can a hole grow" from a
+`Feature` alone. That's now connected to a real user-facing consequence:
+an aggressive-enough compensation value genuinely can block export. The
+block is clear and actionable (names the part, explains likely causes),
+which is the right behavior for now, but it's still possible for a
+combination of material + fit type + an unusually small/thin feature to
+be blocked when a smarter algorithm might have found a valid partial
+adjustment. Not addressed here — flagging it stays more honest than
+quietly working around it with an untested heuristic.
+
 ## Next up
 
-Phase 6 — export & report: write corrected STL(s) to disk (feeding
-`apply_feature_adjustments()`'s output through `trimesh`'s own export),
-plus a human-readable summary of every change made. This is also the
-natural point to add the material picker and an "Apply Compensation"
-action to the GUI, connecting Phase 3's confirmed pairs through Phase
-4's compensation and Phase 5's modification into one real user-facing
-flow — and to surface `check_mesh_integrity()`'s result to the user
-before/instead of exporting something corrupted, per the open item
-above. **Waiting for go-ahead before starting.**
+**Phases 1-6 (the full MVP) are complete.** Per the brief, Phase 7
+(calibration wizard) is explicitly gated on Phases 1-6 "being solid" —
+worth treating this as a natural checkpoint to confirm that's true
+(e.g. trying the app on your own real multi-part STLs, not just the
+synthetic known-dimension fixtures) before moving on, rather than
+ploughing straight ahead. **Waiting for go-ahead before starting Phase 7.**
