@@ -38,6 +38,13 @@ This repo is being built in phases — see `PROGRESS.md` for current status.
   affected part, blocks with a clear error if that would produce invalid
   geometry, otherwise writes a corrected STL per part plus a
   human-readable `compensation_report.txt` to a folder you choose.
+- **Phase 7** (calibration wizard, v1.1): done. **Calibrate Printer...**
+  on the toolbar walks through exporting a small hole+peg test print,
+  entering what you measured with calipers, and saving a printer-specific
+  bias that's layered on top of the generic material defaults for every
+  export from then on (persisted to `~/.interlock3d/calibration.json`,
+  so it survives restarts). **Clear Calibration** reverts to the generic
+  defaults.
 
 ## Project layout
 
@@ -53,6 +60,7 @@ src/interlock3d/
     compensation.py            # material/fit-type clearance lookup + per-pair offset computation
     geometry_modification.py   # apply a computed offset to actual mesh vertices + integrity checks
     export.py                  # chains pairs -> compensation -> applied geometry -> files + report
+    calibration.py             # calibration test part, measurement -> bias, persistence
   data/
     compensation_profiles.json # PLA/PETG/ABS x press/sliding/clearance clearance table
   gui/
@@ -61,6 +69,7 @@ src/interlock3d/
     feature_colors.py       # highlight color/opacity per feature state
     fit_type_dialog.py       # modal dialog to pick a pair's fit type
     report_dialog.py          # read-only dialog showing the compensation report after export
+    calibration_wizard.py     # 3-page QWizard: export test STL -> enter measurements -> save
 scripts/
   make_sample_stl.py      # throwaway STLs for Phase 1 smoke-testing
   validate_phase2.py       # numeric accuracy report for feature detection
@@ -72,6 +81,8 @@ tests/
   test_geometry_modification.py # Phase 5 pytest suite
   test_export.py            # Phase 6 core pipeline pytest suite
   test_export_gui.py         # Phase 6 GUI pytest suite (real click + export flow)
+  test_calibration.py       # Phase 7 core pytest suite (incl. digital-twin round trip)
+  test_calibration_gui.py    # Phase 7 GUI pytest suite (real wizard interaction)
 test_data/
   sample_*.stl             # Phase 1 smoke-test STLs
   known/                    # Phase 2 known-dimension validation STLs
@@ -243,8 +254,36 @@ STL(s)...** button drives; see PROGRESS.md for the real end-to-end smoke
 test (including switching materials mid-session and confirming the
 exported report reflects the picked material, not a stale default).
 
+## Calibration wizard (Phase 7 / v1.1)
+
+Generic material defaults assume the printer prints exactly at nominal
+size; real printers don't (holes typically print a bit undersized, pegs
+a bit oversized, by an amount specific to that printer/material/nozzle).
+**Calibrate Printer...** on the toolbar walks through:
+1. Export a small test print (one hole, one peg, same nominal size).
+2. Print it, let it cool, measure both with calipers.
+3. Enter the measurements — a live preview shows the derived bias.
+4. Finish: the bias is saved (`~/.interlock3d/calibration.json`) and
+   used automatically for every export from then on, layered on top of
+   (not replacing) the fit type's intended clearance. **Clear
+   Calibration** reverts to generic defaults.
+
+```python
+from interlock3d.core.calibration import (
+    CalibrationMeasurement, compute_calibration_profile, generate_calibration_part,
+)
+
+mesh = generate_calibration_part(nominal_radius_mm=5.0)
+mesh.export("calibration_test.stl")
+# ... print it, measure with calipers ...
+profile = compute_calibration_profile(
+    CalibrationMeasurement(nominal_radius_mm=5.0, measured_hole_diameter_mm=9.7, measured_peg_diameter_mm=10.2)
+)
+print(profile.hole_radius_bias_mm, profile.peg_radius_bias_mm)
+```
+
 ## Roadmap
 
-See the phase list in `PROGRESS.md`. Phase 7 (calibration wizard, v1.1)
-is next — explicitly gated on Phases 1-6 being solid per the brief.
-Pending go-ahead.
+See the phase list in `PROGRESS.md`. **Phases 1-7 are all done** — Phase
+8 (packaging into a standalone Windows/Mac executable) is next. Pending
+go-ahead.

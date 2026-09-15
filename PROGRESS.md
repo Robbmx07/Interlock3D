@@ -10,7 +10,7 @@
 | 4 | Compensation engine | **Done** |
 | 5 | Geometry modification | **Done** |
 | 6 | Export & report | **Done** |
-| 7 | Calibration wizard (v1.1) | Not started |
+| 7 | Calibration wizard (v1.1) | **Done** |
 | 8 | Packaging | Not started |
 
 ## Phase 1 — Scaffold + load & view STL
@@ -784,11 +784,180 @@ be blocked when a smarter algorithm might have found a valid partial
 adjustment. Not addressed here — flagging it stays more honest than
 quietly working around it with an untested heuristic.
 
+## Phase 7 — Calibration wizard (v1.1)
+
+**Done.** The brief calls this the "Pro-tier differentiator" and gates
+it on Phases 1-6 being solid; built with the same validation rigor as
+the higher-risk earlier phases (Phase 2, Phase 5) rather than treating
+it as a lighter-weight add-on.
+
+### What was built
+
+- `core/calibration.py`:
+  - `generate_calibration_part(nominal_radius_mm=5.0, ...)`: one small
+    STL containing a through-hole and a free-standing peg, both at the
+    same nominal radius, positioned apart so they print together in one
+    job. Deliberately one size, not a size ladder — the brief calls for
+    "a small calibration test STL," and one hole+peg pair at a
+    caliper-friendly size (10mm diameter by default) is enough to
+    characterize a printer's systematic bias without turning this into a
+    multi-hour print. Built the same way as `plate_with_boss.stl` back
+    in Phase 2 (concatenated disjoint primitives — an annulus and a
+    cylinder — not boolean-fused; still one valid multi-body STL file
+    that slicers handle natively).
+  - `CalibrationMeasurement`: what the user enters (nominal radius +
+    measured hole/peg *diameters*, since that's what a caliper reads,
+    not radii). `.hole_radius_bias_mm()` / `.peg_radius_bias_mm()`
+    convert to the printer's actual radial error.
+  - `CalibrationProfile`: the derived, persistable result (bias values +
+    a timestamp + an optional label like "Ender 3, PLA, 0.4mm nozzle").
+  - `save_calibration_profile()` / `load_calibration_profile()`: JSON
+    persistence to `~/.interlock3d/calibration.json` by default (this is
+    an offline app — calibration has to survive between sessions without
+    any server to store it on). Missing file returns `None` (the normal
+    "never calibrated" state, not an error); a corrupt file raises
+    `CalibrationError` rather than silently pretending no calibration
+    exists.
+  - `compute_calibrated_pair_compensation()`: wraps Phase 4's
+    `compute_pair_compensation()` and **adds** the calibrated bias to
+    each hole/peg adjustment, rather than replacing the generic
+    computation. This was a real design decision (see below) — the
+    fit-type philosophy (press/sliding/clearance) stays exactly what
+    Phase 4 already validated; calibration only corrects for *this
+    printer's* measured deviation from nominal, layered on top. Flat+flat
+    pairs pass through unchanged (the calibration part only measures
+    circular features).
+- `core/export.py` extended (not replaced) with an optional
+  `calibration` parameter on `build_export_plan()`: when active, hole+peg
+  pairs use the calibrated computation; flat+flat pairs and no-calibration
+  runs are byte-identical to Phase 6's existing behavior. `ChangeRecord`
+  gained a `calibration_applied` flag so the human-readable report says
+  "calibrated" next to any change that used it — the report should be
+  honest about *why* a number is what it is, which was already the whole
+  point of Phase 6.
+- GUI: `gui/calibration_wizard.py` (`QWizard`, 3 pages — export the test
+  STL, enter measurements with a live bias preview, review and save) and
+  `gui/main_window.py` wiring: **Calibrate Printer...** / **Clear
+  Calibration** toolbar actions, a status label showing whether
+  calibration is active, and `export_corrected()` now passes the active
+  profile through to `build_export_plan()`.
+
+### Two real bugs found by testing, not by inspection
+
+1. **Same "outer rim reads as a peg" issue from Phase 2, biting a new
+   test.** The calibration part's hole-plate has an outer rim that's a
+   genuine convex cylindrical surface — same as `plate_with_hole.stl` —
+   so it also registers as `feature_type="peg"`, and being larger, it has
+   more area and sorts *before* the actual test peg in
+   `detect_features()`'s output. My first test draft's `_find(features,
+   "peg")` silently grabbed the rim (radius 15mm) instead of the test peg
+   (radius 5mm), which cascaded into a `GeometryModificationError` several
+   steps later in an unrelated-looking assertion — the kind of failure
+   that's confusing to debug from the error alone, and exactly why the
+   fix was in the *test's* feature-selection logic (disambiguate by
+   radius proximity to the known nominal value), not in the detection
+   engine, which was behaving correctly the whole time.
+2. **`export_corrected()` referenced `self._active_calibration` before it
+   was ever defined**, and separately never caught
+   `GeometryModificationError` from `build_export_plan()` (only
+   `CompensationError`) — a real crash-on-invalid-input gap that existed
+   since Phase 6 but had gone unnoticed because Phase 6's own tests never
+   happened to trigger `GeometryModificationError` through the GUI path.
+   Adding calibration bias on top of a fit clearance makes hitting that
+   path meaningfully more likely (a bigger combined adjustment is more
+   likely to exceed a small peg's radius), which is what surfaced it.
+   Both fixed: `self._active_calibration` is now set in `__init__`
+   (loaded from disk, defaulting to `None`), and `export_corrected()`
+   catches `GeometryModificationError` with the same clear-message
+   pattern already used for the Phase 6 integrity-block case.
+
+### Validation
+
+- **Digital-twin round trip** (the core validation claim for this
+  phase): generate the calibration part, apply a **known** synthetic
+  printer error to it using Phase 5's own real vertex-displacement math
+  (not a hand-rolled stand-in) — e.g. hole shrinks 0.15mm, peg grows
+  0.10mm — then re-detect features on the "printed" mesh to get simulated
+  caliper readings, feed those into `compute_calibration_profile()`, and
+  confirm the derived bias **exactly recovers the injected error**
+  (parametrized across 4 error magnitudes including zero-bias). This is a
+  materially stronger claim than unit-testing the bias arithmetic in
+  isolation: it validates that generate → (simulated) print → measure →
+  derive is self-consistent end to end.
+- Confirmed the derived profile **generalizes**: applied a profile
+  derived from the calibration part to a genuinely different, separate
+  hole+peg pair (`plate_with_matched_hole.stl` + `boss_cylinder.stl`) and
+  confirmed the resulting radii match `base_compensation ±
+  calibration_bias` exactly, with the modified meshes still passing
+  `check_mesh_integrity()`.
+- `tests/test_calibration.py`: 15 pytest cases — the round trip above,
+  generator input validation, an atypical negative-bias case (a printer
+  whose holes print *oversized*, handled rather than assumed away),
+  save/load round trip, corrupt/malformed file handling, the additive
+  compensation wrapper's arithmetic, the negative-result clamp, flat+flat
+  pass-through, and the cross-pair generalization test.
+- `tests/test_calibration_gui.py`: 9 pytest cases through the real
+  `QWizard` and `MainWindow` — live bias preview updates as fields
+  change, the exported STL is real/watertight, finishing the wizard
+  saves+activates a profile and updates the toolbar label, cancelling
+  leaves everything unchanged, "Clear Calibration" removes the saved
+  file, and an active calibration measurably changes what
+  `build_export_plan()` produces (compared directly against an
+  uncalibrated run). Every test here uses an explicit `calibration_path`
+  fixture pointed at `tmp_path`, never the real `~/.interlock3d/` — see
+  the testability decision below for why that mattered.
+- Manual end-to-end smoke test of the real running app (4 screenshots
+  captured): opened the actual wizard, exported the test STL through the
+  real button, ran it through the same digital-twin injection as the
+  automated test (0.12mm hole / 0.08mm peg this time, to confirm it
+  wasn't the exact same numbers as the pytest case), entered the
+  simulated readings into the real spin boxes, watched the live preview
+  and final summary page both show the exactly-correct derived bias, and
+  confirmed the toolbar's calibration label updated to show the label
+  text ("Smoke-test printer, PLA") after finishing.
+- Full suite: 86/86 pass under `xvfb-run pytest` (66 from Phases 2-6 + 15
+  Phase 7 core + 9 Phase 7 GUI, three fewer than a raw sum since 4 GUI
+  test *modules*, not individual tests, are what skip without a display);
+  66 pass + 3 modules skipped cleanly without one.
+
+### Key decisions and why
+
+- **Calibration adds to the generic compensation rather than replacing
+  it.** Considered having a calibration profile define its own complete
+  set of press/sliding/clearance values (mirroring the generic
+  material table's shape). Rejected: that would require calibrating
+  against *every* fit type and material combination a user might want,
+  when the test print only measures one thing (this printer's systematic
+  hole/peg sizing error) that's largely independent of which fit type is
+  later requested. Additive composition needs only one calibration print
+  ever, and reuses Phase 4's already-validated fit-type logic unchanged.
+- **One size, not a size ladder.** A calibration test with holes/pegs at
+  several diameters (common in more elaborate community calibration
+  prints) would characterize how bias scales with feature size, which a
+  single-size test can't capture. Traded that precision for print time
+  and workflow simplicity, matching the brief's explicit "a small
+  calibration test STL" — revisit if single-size calibration turns out
+  to be a meaningfully worse predictor across very different feature
+  sizes than the one it was measured at.
+- **Calibration is one global, offline-persisted profile — not per
+  material, per printer profile slot, or versioned.** Simplest possible
+  model for a single-printer hobbyist (the stated target user), and the
+  brief's own framing ("derives a custom compensation profile for that
+  specific printer") doesn't ask for multi-printer profile management.
+  A user with multiple printers/materials would need to
+  recalibrate when switching — a real limitation for that use case, not
+  addressed here, flagged rather than silently designed around.
+- **Injectable `calibration_path` on `MainWindow`, not a hardcoded
+  `~/.interlock3d/` everywhere.** Needed for test isolation: without it,
+  one test's saved calibration would leak into the next test's fresh
+  `MainWindow` instance (they'd all read/write the same real file), and
+  tests would pollute the actual home directory of whatever machine runs
+  them. Confirmed directly — checked `~/.interlock3d/` doesn't exist
+  after running the full suite.
+
 ## Next up
 
-**Phases 1-6 (the full MVP) are complete.** Per the brief, Phase 7
-(calibration wizard) is explicitly gated on Phases 1-6 "being solid" —
-worth treating this as a natural checkpoint to confirm that's true
-(e.g. trying the app on your own real multi-part STLs, not just the
-synthetic known-dimension fixtures) before moving on, rather than
-ploughing straight ahead. **Waiting for go-ahead before starting Phase 7.**
+**Phases 1-7 are complete** — the full MVP plus the Pro-tier calibration
+differentiator. Phase 8 (packaging into a standalone Windows/Mac
+executable via PyInstaller) is the last phase on the roadmap.
+**Waiting for go-ahead before starting Phase 8.**

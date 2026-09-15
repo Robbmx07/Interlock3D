@@ -14,6 +14,7 @@ from pathlib import Path
 
 import trimesh
 
+from interlock3d.core.calibration import CalibrationProfile, compute_calibrated_pair_compensation
 from interlock3d.core.compensation import CompensationTable, compute_pair_compensation
 from interlock3d.core.features import Feature
 from interlock3d.core.geometry_modification import (
@@ -39,9 +40,12 @@ class ChangeRecord:
     paired_feature_type: str
     fit_type: str
     material: str
+    calibration_applied: bool = False
 
     def describe(self) -> str:
         why = f"paired with {self.paired_part_name}'s {self.paired_feature_type}, {FIT_TYPE_LABELS[self.fit_type]}, {self.material}"
+        if self.calibration_applied:
+            why += ", calibrated"
         if self.feature_type == "hole":
             return (
                 f"{self.part_name}: hole radius {self.original_radius_mm:.3f}mm -> "
@@ -65,6 +69,10 @@ class ExportPlan:
     assembly can be exported together."""
     integrity: dict[str, MeshIntegrityReport] = field(default_factory=dict)
     """Only for parts that actually had at least one adjustment applied."""
+    calibration: CalibrationProfile | None = None
+    """The profile that was active when this plan was built, if any --
+    purely informational (already folded into `changes`), kept here so
+    the report header can name it."""
 
     @property
     def has_integrity_problems(self) -> bool:
@@ -81,6 +89,7 @@ def build_export_plan(
     material: str,
     split_ratio: float = 0.5,
     table: CompensationTable | None = None,
+    calibration: CalibrationProfile | None = None,
 ) -> ExportPlan:
     table = table or CompensationTable.load()
 
@@ -90,7 +99,21 @@ def build_export_plan(
     for pair in pairs:
         feat_a = features_by_part[pair.a.part_name][pair.a.feature_index]
         feat_b = features_by_part[pair.b.part_name][pair.b.feature_index]
-        comp = compute_pair_compensation(pair, feat_a.feature_type, feat_b.feature_type, material, split_ratio, table)
+
+        # Calibration only measured circular features (the test part has
+        # one hole, one peg) -- a flat+flat pair falls back to the
+        # uncalibrated computation, same as if no profile were active.
+        is_hole_peg = {feat_a.feature_type, feat_b.feature_type} == {"hole", "peg"}
+        if calibration is not None and is_hole_peg:
+            comp = compute_calibrated_pair_compensation(
+                pair, feat_a.feature_type, feat_b.feature_type, material, calibration, split_ratio, table
+            )
+            applied_calibration = True
+        else:
+            comp = compute_pair_compensation(
+                pair, feat_a.feature_type, feat_b.feature_type, material, split_ratio, table
+            )
+            applied_calibration = False
 
         for ref, feature, adjustment, other_ref, other_feature in (
             (pair.a, feat_a, comp.adjustment_a, pair.b, feat_b),
@@ -117,6 +140,7 @@ def build_export_plan(
                     paired_feature_type=other_feature.feature_type,
                     fit_type=pair.fit_type,
                     material=material,
+                    calibration_applied=applied_calibration,
                 )
             )
 
@@ -131,11 +155,28 @@ def build_export_plan(
         else:
             modified_meshes[name] = mesh.copy()
 
-    return ExportPlan(material=material, changes=changes, modified_meshes=modified_meshes, integrity=integrity)
+    return ExportPlan(
+        material=material,
+        changes=changes,
+        modified_meshes=modified_meshes,
+        integrity=integrity,
+        calibration=calibration,
+    )
 
 
 def format_report(plan: ExportPlan) -> str:
-    lines = ["Interlock3D Compensation Report", f"Material: {plan.material}", ""]
+    lines = ["Interlock3D Compensation Report", f"Material: {plan.material}"]
+    if plan.calibration is not None:
+        c = plan.calibration
+        label = f" ({c.label})" if c.label else ""
+        lines.append(
+            f"Calibration: active{label} -- hole bias {c.hole_radius_bias_mm:+.3f}mm, "
+            f"peg bias {c.peg_radius_bias_mm:+.3f}mm, from a {c.nominal_radius_mm:.1f}mm test print, "
+            f"recorded {c.created_at}"
+        )
+    else:
+        lines.append("Calibration: none (using generic material defaults)")
+    lines.append("")
 
     if not plan.changes:
         lines.append("No feature pairs were confirmed -- all parts exported unmodified.")

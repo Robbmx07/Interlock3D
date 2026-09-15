@@ -24,13 +24,22 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from interlock3d.core.calibration import (
+    DEFAULT_CALIBRATION_PATH,
+    CalibrationError,
+    CalibrationProfile,
+    load_calibration_profile,
+    save_calibration_profile,
+)
 from interlock3d.core.compensation import CompensationError, CompensationTable
 from interlock3d.core.export import build_export_plan, export_plan, format_report
 from interlock3d.core.feature_detection import DetectionConfig, detect_features, feature_id_per_face
 from interlock3d.core.features import Feature
+from interlock3d.core.geometry_modification import GeometryModificationError
 from interlock3d.core.mesh_loader import MeshLoadError, feature_overlay_polydata, load_trimesh, trimesh_to_pyvista
 from interlock3d.core.pairing import FIT_TYPE_LABELS, FeaturePair, FeatureRef, are_types_compatible
 from interlock3d.gui import feature_colors
+from interlock3d.gui.calibration_wizard import CalibrationWizard
 from interlock3d.gui.fit_type_dialog import FitTypeDialog
 from interlock3d.gui.report_dialog import ReportDialog
 from interlock3d.gui.viewer import MeshViewer
@@ -40,7 +49,7 @@ _OVERLAY_OFFSET_MIN = 0.01
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, calibration_path: Path | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Interlock3D")
         self.resize(1300, 850)
@@ -51,6 +60,18 @@ class MainWindow(QMainWindow):
         self._pending: FeatureRef | None = None
         self._pair_color_cycle = itertools.cycle(feature_colors.PAIR_COLORS)
         self._compensation_table = CompensationTable.load()
+        # Overridable (defaults to ~/.interlock3d/calibration.json) so tests
+        # can point this at a tmp_path instead of the real home directory --
+        # otherwise one test's saved calibration would leak into the next
+        # test's fresh MainWindow instance.
+        self._calibration_path = calibration_path or DEFAULT_CALIBRATION_PATH
+        try:
+            self._active_calibration: CalibrationProfile | None = load_calibration_profile(self._calibration_path)
+        except CalibrationError:
+            # A corrupt saved profile shouldn't prevent the app from
+            # starting -- fall back to no calibration (generic defaults),
+            # same as a user who's never calibrated.
+            self._active_calibration = None
 
         self.viewer = MeshViewer(self)
         self.viewer.enable_feature_picking(self._on_feature_clicked)
@@ -123,6 +144,19 @@ class MainWindow(QMainWindow):
         export_action = QAction("Export Corrected STL(s)...", self)
         export_action.triggered.connect(self.export_corrected)
         toolbar.addAction(export_action)
+
+        toolbar.addSeparator()
+        calibrate_action = QAction("Calibrate Printer...", self)
+        calibrate_action.triggered.connect(self.open_calibration_wizard)
+        toolbar.addAction(calibrate_action)
+
+        self.clear_calibration_action = QAction("Clear Calibration", self)
+        self.clear_calibration_action.triggered.connect(self.clear_calibration)
+        toolbar.addAction(self.clear_calibration_action)
+
+        self.calibration_label = QLabel(self)
+        toolbar.addWidget(self.calibration_label)
+        self._refresh_calibration_label()
 
     # -- Loading -----------------------------------------------------
 
@@ -313,10 +347,21 @@ class MainWindow(QMainWindow):
         material = self.material_combo.currentText()
         try:
             plan = build_export_plan(
-                self._pairs, self._parts, self._part_features, material=material, table=self._compensation_table
+                self._pairs,
+                self._parts,
+                self._part_features,
+                material=material,
+                table=self._compensation_table,
+                calibration=self._active_calibration,
             )
         except CompensationError as exc:
             QMessageBox.critical(self, "Cannot compute compensation", str(exc))
+            return
+        except GeometryModificationError as exc:
+            # e.g. a fit clearance (possibly widened further by an active
+            # calibration bias) would shrink a peg past its own radius --
+            # analytically invalid, raised before any geometry is touched.
+            QMessageBox.critical(self, "Cannot apply compensation", str(exc))
             return
 
         if plan.has_integrity_problems:
@@ -343,6 +388,45 @@ class MainWindow(QMainWindow):
 
         dialog = ReportDialog(self, format_report(plan))
         dialog.exec()
+
+    # -- Calibration --------------------------------------------------
+
+    def open_calibration_wizard(self) -> None:
+        wizard = CalibrationWizard(self)
+        if wizard.exec() != QDialog.Accepted:
+            return
+
+        profile = wizard.resulting_profile()
+        self._active_calibration = profile
+        try:
+            save_calibration_profile(profile, self._calibration_path)
+            self.statusBar().showMessage(
+                f"Calibration saved and active: hole {profile.hole_radius_bias_mm:+.3f}mm, "
+                f"peg {profile.peg_radius_bias_mm:+.3f}mm",
+                5000,
+            )
+        except OSError as exc:
+            QMessageBox.warning(
+                self,
+                "Calibration active but not saved",
+                f"Using this calibration for the rest of this session, but couldn't save it to disk "
+                f"for next time: {exc}",
+            )
+        self._refresh_calibration_label()
+
+    def clear_calibration(self) -> None:
+        self._active_calibration = None
+        self._calibration_path.unlink(missing_ok=True)
+        self._refresh_calibration_label()
+        self.statusBar().showMessage("Calibration cleared; exports will use generic material defaults.", 3000)
+
+    def _refresh_calibration_label(self) -> None:
+        if self._active_calibration is None:
+            self.calibration_label.setText(" Calibration: none (generic defaults) ")
+        else:
+            c = self._active_calibration
+            suffix = f" ({c.label})" if c.label else ""
+            self.calibration_label.setText(f" Calibration: active{suffix} ")
 
     # -- Housekeeping -----------------------------------------------
 
