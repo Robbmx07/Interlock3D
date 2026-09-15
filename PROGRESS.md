@@ -1218,13 +1218,18 @@ without one, rather than skipping validation entirely:
   something novel — lower risk than hand-derived math, but still
   unverified by actual rendering.
 
-**Not validated: whether the page actually renders correctly in a real
-browser.** This is a real gap, flagged rather than glossed over — the
-parsing logic and matrix math are checked, but WebGL shader compilation,
-the lighting result, and the orbit/pan/zoom feel have not been seen
-rendered by anyone, including me. Asking you to open the published
-Artifact link and report back what you see (or don't) is the
-validation this phase is still missing.
+**Confirmed rendering correctly in a real browser, by the user, with
+their own file — not just the bundled examples.** They imported their
+own `box.stl` (an open-top enclosure, 104 triangles, 75×100×150mm) and
+reported back a screenshot: correct WebGL shading (lit top/side faces,
+visibly hollow interior), the print-bed grid scaled correctly under the
+part, the parts list and bottom readout (`PARTS 1`, `TRIANGLES 104`,
+`BBOX 75.0mm × 100.0mm × 150.0mm`) all correct, and the visual design
+(wordmark, phase badge, mono tabular-nums readout, accent color)
+rendering as intended. This is a stronger check than anything I could
+have run myself — a real user's own file through the real file-picker
+path, not a pre-validated bundled example. The one gap this phase was
+missing is closed.
 
 ### Key decisions and why
 
@@ -1248,12 +1253,13 @@ validation this phase is still missing.
 
 ## Next up (Web track)
 
+W1 is now confirmed working in a real browser on a real user file (see
+above) — the foundation W2+ would build on is no longer unverified.
+
 Phase W2 — feature detection in JS: port the segmentation (dihedral-angle
 region growing) and cylinder/plane classification approach from
 `interlock3d/core/feature_detection.py`, without a RANSAC library
 (browser has no `pyransac3d` equivalent readily available under the same
 CDN constraints described above) — likely a direct least-squares or
 simple-RANSAC implementation written by hand, same reasoning as W1's
-renderer. **Waiting for go-ahead, and — importantly — for confirmation
-that W1 actually renders correctly for you first**, before building
-further phases on top of an unverified foundation.
+renderer. **Waiting for go-ahead before starting.**
