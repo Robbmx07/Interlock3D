@@ -8,7 +8,7 @@
 | 2 | Feature detection engine | **Done** |
 | 3 | Feature pairing UI | **Done** |
 | 4 | Compensation engine | **Done** |
-| 5 | Geometry modification | Not started |
+| 5 | Geometry modification | **Done** |
 | 6 | Export & report | Not started |
 | 7 | Calibration wizard (v1.1) | Not started |
 | 8 | Packaging | Not started |
@@ -521,11 +521,149 @@ mating turns out to matter a lot in practice, the underlying clearance
 *values* (same table as hole/peg) might deserve their own dedicated
 tuning rather than inheriting hole/peg numbers.
 
+## Phase 5 — Geometry modification
+
+**Done.** The brief flags this (with Phase 2) as the highest-risk phase
+in the project — validated accordingly, not on vibes.
+
+### What was built
+
+- `core/geometry_modification.py`:
+  - `displace_feature_vertices(vertices, faces, feature, material_removed_mm)`:
+    the core operation. Moves exactly the vertices belonging to one
+    feature's `face_indices`, direction implied by `feature.feature_type`
+    (matching Phase 4's convention): hole → radially outward from the
+    fitted axis; peg → radially inward; flat → along the negative of its
+    own normal (recessed into the solid). Takes and returns a plain
+    vertices array (not a mesh) specifically so multiple adjustments can
+    be chained — later calls see earlier ones' displacements for any
+    vertex they happen to share.
+  - `apply_feature_adjustments(mesh, features, adjustments)`: the
+    convenience wrapper — takes a list of `(feature_index,
+    material_removed_mm)` pairs, returns a **new** `Trimesh` (input never
+    mutated, confirmed by test).
+  - `check_mesh_integrity(mesh) -> MeshIntegrityReport`: watertight,
+    winding-consistent, no degenerate (near-zero-area) faces, and —
+    added after a stress-test finding, see below — not inside-out via a
+    negative-volume check. `.is_valid` folds all four into one boolean.
+  - `GeometryModificationError`: raised *before* touching geometry for a
+    request that's analytically known to be invalid (shrinking a peg by
+    more than its own radius) rather than silently producing a
+    self-intersected or negative-radius peg.
+- Topology (faces, vertex connectivity) is never changed here — only
+  vertex *positions* move. That's the whole safety argument for why this
+  can preserve watertightness at all: if the input was already a valid
+  closed, consistently-wound manifold, moving vertices without adding or
+  removing any can only break that via actual geometric self-intersection,
+  not via a topology bug.
+- Added `plate_with_matched_hole.stl` to `tests/known_parts.py` (hole
+  r=6mm, matching `boss_cylinder.stl`'s r=6mm peg) specifically so a
+  realistic same-nominal-size hole+peg pair could be run through the
+  actual Phase 3→4→5 pipeline end to end, rather than only unit-testing
+  each phase's pieces in isolation. (`plate_with_hole.stl`'s r=5mm hole
+  was deliberately mismatched against `boss_cylinder`'s r=6mm peg for
+  Phase 2/3 detection/pairing tests — fine there, since those don't care
+  about the two features fitting together, but wrong for testing
+  "does the compensated clearance actually come out right.")
+
+### A real finding from stress-testing, not just theory
+
+There's no analytic upper bound on how much a hole can grow the way there
+is for a peg (a peg's radius can't go below zero; a hole has no such
+built-in ceiling — a `Feature` alone doesn't know where the surrounding
+material actually ends). So I deliberately stress-tested with an
+excessive enlargement (`plate_with_hole`'s r=5mm hole grown by 17mm,
+i.e. past the disk's own r=20mm outer boundary) to see what happens
+rather than assuming it's fine. Result: **`is_watertight` and
+`is_winding_consistent` both stayed `True`** — because topology never
+changed, both checks (which are purely about face/edge connectivity, not
+actual 3D shape) are satisfied even though the hole had folded past the
+outer boundary and the effective solid had inverted. The volume, though,
+went **negative** (-1317 vs. the original +5881). Added a
+`has_negative_volume` check specifically because of this — without it,
+`MeshIntegrityReport` would have reported this corrupted mesh as fully
+valid. Pinned as `test_oversized_hole_enlargement_is_caught_via_negative_volume`.
+
+This directly matters for later phases: nothing here currently stops a
+user (via a future GUI) from requesting a compensation value large
+enough to trigger this. Phase 5's job per the brief was "apply the
+computed offset... without corrupting the model" and to *validate*
+that — which now happens — not to make every conceivable input safe by
+construction (there's no clean way to bound "how much can this hole grow
+before it's absurd" from the Feature data alone, without also knowing
+the local surrounding geometry, which is a materially bigger feature).
+**Flagging as an open item for Phase 6/GUI wiring**: when a material
+picker and "apply" action land, the resulting mesh's integrity report
+should be checked and surfaced to the user (block or warn) rather than
+silently exporting corrupted geometry from an unreasonable clearance
+value — not implemented yet since there's no GUI trigger for this action
+until Phase 6.
+
+### Validation
+
+- `tests/test_geometry_modification.py`: 10 pytest cases. For hole
+  enlargement, peg shrinkage, and flat recession: applies a realistic
+  clearance (0.2–0.3mm), checks `is_valid` both isn't needed before
+  (already known-good fixtures) and is confirmed after, then **re-runs
+  `detect_features()` on the modified mesh** and checks the newly
+  detected radius/extent/area matches what was requested — not just that
+  vertices moved *somewhere*, but that the result is actually the right
+  shape. Also covers: multiple adjustments composing correctly on one
+  part, the negative-volume stress case above, peg-shrink-past-zero and
+  exactly-zero both rejected, negative `material_removed_mm` rejected,
+  input mesh never mutated, and the full Phase 3→4→5 pipeline test
+  described above.
+- `scripts/validate_phase5.py`: numeric report in the same style as
+  Phase 2's, run against all the known parts' hole/peg/flat features at
+  a real PLA-sliding-fit clearance (0.25mm). **5/5 checks passed, radius
+  error 0.0000mm on every case** (floating-point exact, same as Phase
+  2's synthetic-geometry results — expected, since this is exact vertex
+  math on clean primitives, not an approximation).
+- Visual confirmation: rendered before/after screenshots at an
+  exaggerated clearance (1.5–2mm, well beyond any realistic fit value)
+  specifically so any corruption would be visually obvious rather than
+  numerically subtle — hole visibly grew, rim visibly shrank, boss
+  visibly narrowed, no visible artifacts in any case.
+- Full suite: 50/50 pass under `xvfb-run pytest` (14 Phase 2 + 19 Phase 4
+  + 7 Phase 3 + 10 new Phase 5; Phase 2's count went 12→14 from the new
+  `plate_with_matched_hole` fixture being picked up automatically by its
+  existing parametrized tests).
+
+### Key decisions and why
+
+- **Vertex-array-in, vertex-array-out for the core displacement
+  function; mesh-in, mesh-out only at the convenience-wrapper level.**
+  Keeps the actual math free of any mesh-object bookkeeping and makes
+  chaining multiple adjustments on one part explicit and testable in
+  isolation (`displace_feature_vertices` is directly unit-tested without
+  needing a full `apply_feature_adjustments` call).
+- **No attempt to auto-bound "how much can a hole grow."** Considered
+  adding a heuristic (e.g. reject if new radius exceeds some fraction of
+  the part's bounding box), but any such bound would be a guess without
+  knowing the actual surrounding geometry, and could reject a
+  *legitimate* large clearance on a large part while still not
+  catching every real problem. Chose to validate the *output*
+  unconditionally (the negative-volume check) rather than gate the
+  *input* with a heuristic that gives false confidence either way.
+- **Shared-vertex behavior between adjacent features is inherited from
+  Phase 3's already-flagged limitation, not newly introduced.** Two
+  features whose patches share a boundary vertex (e.g. a hole's wall and
+  the surrounding flat face) naturally move together correctly here,
+  since it's literally the same vertex index in both patches — that's a
+  feature, not a workaround. What's *not* handled is two DIFFERENT
+  *adjusted* features sharing a vertex directly (no flat "buffer" between
+  them) — not exercised by any known test part, and not expected in
+  typical hole/peg-in-a-flat-face geometry, but noted here rather than
+  silently assumed away.
+
 ## Next up
 
-Phase 5 — geometry modification: apply each `FeatureAdjustment` to the
-actual mesh (enlarge a hole / shrink a peg / recess a flat face) by
-moving the relevant vertices, without corrupting the rest of the model.
-Validate watertightness/manifoldness on the hand-made test set, per the
-brief. This is the phase that will need a material picker in the GUI.
-**Waiting for go-ahead before starting.**
+Phase 6 — export & report: write corrected STL(s) to disk (feeding
+`apply_feature_adjustments()`'s output through `trimesh`'s own export),
+plus a human-readable summary of every change made. This is also the
+natural point to add the material picker and an "Apply Compensation"
+action to the GUI, connecting Phase 3's confirmed pairs through Phase
+4's compensation and Phase 5's modification into one real user-facing
+flow — and to surface `check_mesh_integrity()`'s result to the user
+before/instead of exporting something corrupted, per the open item
+above. **Waiting for go-ahead before starting.**

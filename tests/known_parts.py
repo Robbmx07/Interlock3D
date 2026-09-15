@@ -62,6 +62,7 @@ def generate_known_parts() -> list[KnownPart]:
         _make_plate_with_hole(),
         _make_boss_cylinder(),
         _make_plate_with_boss(),
+        _make_plate_with_matched_hole(),
     ]
     for part in parts:
         part.path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,5 +168,35 @@ def _make_plate_with_boss() -> KnownPart:
             ExpectedFeature("flat", area=side_area),
             ExpectedFeature("flat", area=cap_area),
             ExpectedFeature("flat", area=cap_area),
+        ],
+    )
+
+
+def _make_plate_with_matched_hole() -> KnownPart:
+    # Same hole radius as boss_cylinder's peg (6mm) -- unlike
+    # plate_with_hole (r=5, a mismatch with boss_cylinder's r=6 peg, fine
+    # for testing detection/pairing but not a real mating pair), this one
+    # exists specifically so Phase 5/6 tests can pair it with
+    # boss_cylinder.stl and validate a *physically sensible* hole+peg
+    # compensation end to end: same nominal size going in, a real
+    # functional gap coming out.
+    r_hole, r_outer, thickness = 6.0, 20.0, 5.0
+    mesh = trimesh.creation.annulus(r_min=r_hole, r_max=r_outer, height=thickness, sections=64)
+    mesh.export(KNOWN_DIR / "plate_with_matched_hole.stl")
+
+    ring_area = math.pi * (r_outer**2 - r_hole**2)
+
+    return KnownPart(
+        name="plate_with_matched_hole",
+        path=KNOWN_DIR / "plate_with_matched_hole.stl",
+        description=(
+            f"disk r={r_outer}mm, thickness={thickness}mm, through-hole r={r_hole}mm "
+            "(matches boss_cylinder.stl's peg radius, for a realistic hole+peg pair test)"
+        ),
+        expected=[
+            ExpectedFeature("hole", radius=r_hole, extent=thickness),
+            ExpectedFeature("peg", radius=r_outer, extent=thickness),
+            ExpectedFeature("flat", area=ring_area),
+            ExpectedFeature("flat", area=ring_area),
         ],
     )

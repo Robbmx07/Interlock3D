@@ -26,6 +26,13 @@ This repo is being built in phases — see `PROGRESS.md` for current status.
   pair, a material, and its fit type, `compute_pair_compensation()` looks
   up a clearance value from a JSON profile table and returns how much to
   grow/shrink each feature.
+- **Phase 5** (geometry modification): done, backend only — no GUI
+  wiring yet (that naturally lands in Phase 6, alongside export).
+  `apply_feature_adjustments()` moves a feature's actual mesh vertices by
+  a computed amount (radially for a hole/peg, along the normal for a
+  flat face) and returns a new mesh; `check_mesh_integrity()` verifies
+  the result is still watertight, winding-consistent, and hasn't turned
+  inside-out (see PROGRESS.md for a real corruption case this caught).
 
 ## Project layout
 
@@ -39,6 +46,7 @@ src/interlock3d/
     features.py              # Feature dataclass
     pairing.py                # FeatureRef / FeaturePair data model + type-compatibility check
     compensation.py            # material/fit-type clearance lookup + per-pair offset computation
+    geometry_modification.py   # apply a computed offset to actual mesh vertices + integrity checks
   data/
     compensation_profiles.json # PLA/PETG/ABS x press/sliding/clearance clearance table
   gui/
@@ -54,6 +62,7 @@ tests/
   test_feature_detection.py # Phase 2 pytest regression suite
   test_pairing_gui.py       # Phase 3 pytest suite (real VTK-driven click simulation)
   test_compensation.py      # Phase 4 pytest suite
+  test_geometry_modification.py # Phase 5 pytest suite
 test_data/
   sample_*.stl             # Phase 1 smoke-test STLs
   known/                    # Phase 2 known-dimension validation STLs
@@ -101,6 +110,25 @@ flat+flat pairs — anything else raises `CompensationError` (and the GUI
 already refuses to let you *create* an incompatible pair in the first
 place). This only computes numbers; applying them to mesh geometry is
 Phase 5.
+
+## Geometry modification (Phase 5)
+
+```python
+from interlock3d.core.geometry_modification import apply_feature_adjustments, check_mesh_integrity
+
+modified = apply_feature_adjustments(mesh, features, [(feature_index, result.adjustment_a.material_removed_mm)])
+report = check_mesh_integrity(modified)
+assert report.is_valid  # watertight, winding-consistent, no degenerate faces, positive volume
+```
+
+Moves exactly one feature's vertices — radially for a hole (grows) or
+peg (shrinks), along the surface normal for a flat face (recessed
+inward) — and returns a new mesh; the input is never mutated. Run the
+numeric + integrity report:
+
+```bash
+python scripts/validate_phase5.py
+```
 
 ## Setup
 
@@ -175,5 +203,5 @@ helper silently failed to resolve clicks on plain triangulated surfaces.
 
 ## Roadmap
 
-See the phase list in `PROGRESS.md`. Phase 5 (geometry modification) is
-next, pending go-ahead.
+See the phase list in `PROGRESS.md`. Phase 6 (export & report) is next,
+pending go-ahead.
