@@ -316,8 +316,12 @@ directly (not possible from this Linux dev environment).
 
 A separate, parallel browser-based rebuild — not a replacement for the
 desktop app above, started because "no install" is a genuinely different
-ask. See `web/README.md`. Phase 1 (load & view STL) is live:
-https://claude.ai/artifact/7WfUs7CACk7Yxhz4RxbYtH — **not yet confirmed
-to render correctly by anyone**, since this dev environment has no
-browser to check it in; see `PROGRESS.md`'s "Web Reimplementation Track"
-section for what was and wasn't validated.
+ask. See `web/README.md`. **All seven phases are done** (load/view,
+feature detection, click-to-pair, compensation, geometry modification,
+export, calibration wizard) — full functional parity with the desktop
+app's core pipeline, live at
+https://claude.ai/artifact/7WfUs7CACk7Yxhz4RxbYtH and confirmed working
+end-to-end in a real browser (both by a real user's own file in Phase
+W1, and by real automated Playwright testing of the full click-to-pair
+→ export flow for W2-W7); see `PROGRESS.md`'s "Web Reimplementation
+Track" section for what was built and how it was validated.

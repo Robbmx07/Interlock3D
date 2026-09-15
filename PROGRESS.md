@@ -1125,12 +1125,20 @@ anywhere).
 | Phase | Description | Status |
 |---|---|---|
 | W1 | Load & view STL | **Done** |
-| W2 | Feature detection | Not started |
-| W3 | Feature pairing UI | Not started |
-| W4 | Compensation engine | Not started |
-| W5 | Geometry modification | Not started |
-| W6 | Export & report | Not started |
-| W7 | Calibration wizard | Not started |
+| W2 | Feature detection | **Done** |
+| W3 | Feature pairing UI | **Done** |
+| W4 | Compensation engine | **Done** |
+| W5 | Geometry modification | **Done** |
+| W6 | Export & report | **Done** |
+| W7 | Calibration wizard | **Done** |
+
+All seven web-track phases are now complete — the browser build has full
+functional parity with the Python desktop app's core pipeline (load →
+detect → pair → compensate → modify → export → calibrate), built and
+validated in one continuous pass at the user's explicit request to
+override the usual phase-by-phase "wait for go-ahead" cadence for this
+round. See "Phases W2-W7 — full pipeline" below for what was built and
+how each phase was validated.
 
 ## Phase W1 — Load & view STL
 
@@ -1251,15 +1259,178 @@ missing is closed.
   test setup is warranted — flagged as an open question, not decided
   here.
 
+## Phases W2-W7 — full pipeline
+
+Built and validated in one continuous pass (user request: "Complete all
+phases remaining and give me the HTML," explicitly overriding the
+phase-by-phase cadence used everywhere else in this project). All new
+code is hand-written JS with no external libraries, inlined directly
+into `viewer.html` — same constraint and reasoning as W1's renderer.
+
+### What was built
+
+- **W2 — feature detection.** Direct JS port of
+  `interlock3d/core/feature_detection.py`: dihedral-angle mesh
+  segmentation (union-find over face adjacency), a hand-written cyclic
+  Jacobi eigenvalue solver for symmetric 3×3 matrices (used for both
+  plane-normal PCA and cylinder-axis PCA), a Kasa circle fit for
+  radius/center in the local plane perpendicular to a candidate
+  cylinder axis, arc-coverage via the max-angular-gap method, and
+  convexity classification (area-weighted radial·normal dot product)
+  to tell a peg from a hole. Runs automatically on every loaded part
+  (examples and user files alike) right after it's parsed.
+- **W3 — picking & pairing UI.** A hand-written Möller-Trumbore
+  ray-triangle intersector reconstructs a world-space ray from a
+  mouse click (using the same camera basis as the renderer, no matrix
+  inversion needed) and finds the nearest hit across every loaded
+  part. Clicking a detected feature arms it (gold highlight); clicking
+  a compatible feature on a *different* part confirms a pair (green
+  highlight) and adds a row to the Pairs panel with a per-pair fit-type
+  selector; clicking an already-paired feature removes that pair.
+  Feature highlights are separate small "overlay" meshes pushed
+  slightly outward along vertex normals (avoids z-fighting with the
+  part's own surface) and alpha-blended over the solid part.
+- **W4 — compensation engine.** `compensation_profiles.json`'s data
+  (PLA/PETG/ABS × press/sliding/clearance clearance-per-side values)
+  ported verbatim; a global material selector plus each pair's own fit
+  type determines how much material is added to a hole / removed from
+  a peg, split between the two features (50/50 by default, or biased
+  toward the hole via a split ratio, mirroring the Python engine).
+- **W5 — geometry modification.** Radial vertex displacement for
+  hole/peg features (outward for a hole, inward for a peg, rejecting a
+  peg shrink that would collapse its radius to zero or below) and
+  axial displacement for a flat face. Mesh integrity checking
+  (watertight via edge-multiplicity, winding-consistent via edge
+  direction, no degenerate faces, and — the check the Python engine
+  added after a real stress-testing finding — no negative signed
+  volume, since a hole grown past its part's own outer boundary can
+  stay watertight and winding-consistent while the effective solid
+  inverts) runs after every export.
+- **W6 — export & report.** A hand-written binary STL writer (the
+  inverse of W1's parser) and a hand-written STORED-only ZIP archiver
+  (CRC32, local file headers, central directory, EOCD record — no
+  compression, which keeps the implementation small and needs no
+  library) bundle every part's corrected (or unchanged) STL plus a
+  `compensation_report.txt` into one `.zip`, offered via the Artifact
+  platform's `downloads` capability. The zip is needed because `.stl`
+  alone isn't in that capability's file-extension allowlist.
+- **W7 — calibration wizard.** A hand-written mesh generator (ring/disk
+  cap + side-wall triangulation, analogous to `trimesh.creation.annulus`
+  /`cylinder`) produces a small hole+peg test part at a chosen nominal
+  radius, downloadable as a zip with a short instructions file. After
+  printing and measuring it with calipers, entering the two diameters
+  computes a bias profile (hole undersize / peg oversize) that's
+  layered on top of the generic material clearance for future exports,
+  saved to `localStorage` (a per-viewer convenience, not shared state —
+  matches the Artifact design guidance to keep this kind of state out
+  of a platform capability).
+
+### Validation
+
+Every module was written as a standalone, Node-testable file first
+(CommonJS `module.exports`, no DOM/WebGL dependency) and validated
+against real data before being inlined into the page — the same
+"digital twin" discipline used throughout the Python project, extended
+here with a genuine cross-check the Python side didn't have: **numeric
+parity against the already-validated Python engine**, not just
+internal self-consistency.
+
+- **W2**: exact parity with Python's `detect_features()` on all four
+  real fixture STLs (`flat_plate`, `plate_with_matched_hole`,
+  `boss_cylinder`, `plate_with_boss`) — matching radii, extents, and
+  feature counts to Python's own logged values, including a
+  previously-fixed Python bug (mean-normal-near-zero bailout for
+  full-360° cylinders) reproduced correctly in the JS port from the
+  start.
+- **W3**: exact ray-triangle hit/miss cases, a real-geometry pick on
+  `boss_cylinder.stl` landing at the exact expected distance
+  (`100 - radius`) for both the side wall (→ peg) and the top cap
+  (→ flat).
+- **W4**: every value matches Python's own `test_compensation.py`
+  cases exactly.
+- **W5**: baseline volumes match Python exactly on all watertight
+  fixtures; a hole-enlarge case matches to float32 precision; a
+  peg-over-shrink correctly throws; and — the strongest single check
+  in this phase — the exact negative-volume stress test from the
+  Python suite (`plate_with_hole`'s hole grown 17mm) reproduces
+  Python's exact logged volume (`-1317.35`, watertight, winding
+  consistent, `has_negative_volume=true`) to the same precision.
+- **W6**: `crc32()` verified against the standard test vector
+  (`CRC32("123456789") === 0xCBF43926`); the STL writer round-trips
+  through the real parser with zero float error; the hand-written ZIP
+  was written to a real file and verified with the system's actual
+  `unzip -l` / `unzip -t` (listing correct, "No errors detected",
+  extracted bytes byte-identical to the source).
+- **W7**: the same "digital twin" methodology as Python's own
+  calibration tests — generate the test part, inject a *known*
+  synthetic printer error via W5's real displacement math, re-detect
+  features on the "printed" mesh to simulate a caliper reading, and
+  confirm the derived bias exactly recovers the injected error, across
+  the same parametrized cases Python's suite uses (including the
+  zero-bias/perfect-printer edge case and an atypical
+  oversized-hole-gives-negative-bias case). Also validated applying a
+  profile derived from the calibration part to a genuinely different
+  real pair (`plate_with_matched_hole` + `boss_cylinder`), matching
+  Python's expected resulting radii.
+- **Full-assembly, real-browser, end-to-end test.** Unlike W1 (which
+  had no browser automation available and had to wait for the user's
+  own confirmation), this environment turned out to have Chromium and
+  Playwright pre-installed. Used them to load the actual assembled
+  `viewer.html` in a real headless browser and drive the real UI: the
+  two bundled example parts load and are auto-detected (1 hole + 1 peg
+  + 2 flats, and 1 peg + 2 flats); a world-space point on the hole's
+  actual surface was projected through the *live* camera matrices to a
+  screen pixel and clicked (via a real synthetic pointer event, not a
+  direct function call) — arming the hole; the peg was clicked the same
+  way, confirming a real pair through the *actual* pointerdown/pointerup
+  handlers, exactly as a real user's click would; export was triggered
+  and produced a zip via a mocked `downloads.save`; calibration status
+  updated correctly in the DOM; re-clicking a paired feature correctly
+  removed the pair. This caught two real bugs before publishing: (1) the
+  two bundled example parts were both centered at the world origin
+  (coincident, not spatially separated — harmless for a static viewer
+  but nonsensical once picking/pairing existed), fixed by offsetting
+  them apart in `loadExamples()`; (2) the calibration modal's backdrop
+  `<div>`, despite having the `hidden` attribute, was still
+  intercepting canvas clicks everywhere on screen, because its
+  `display:flex` CSS rule outranks the browser's default `[hidden]{
+  display:none}` and this file (unlike a page published through the
+  Artifact platform's own skeleton) has no explicit reset for that —
+  fixed with an explicit `.modal-backdrop[hidden]{display:none}` rule.
+  Also confirmed clean rendering in both light and dark theme and zero
+  console/page errors (aside from an expected offline-sandbox Google
+  Fonts fetch failure with no functional effect, since the page falls
+  back to system fonts).
+
+### Key decisions and why
+
+- **All parts export, not just paired ones** (suffixed `_corrected.stl`
+  even when unmodified) — matches Python's `export_plan()` exactly, so
+  the whole assembly can always be exported together and a re-export
+  into the same folder as the originals can never silently clobber an
+  input file.
+- **One global material, per-pair fit type** — matches
+  `build_export_plan()`'s signature in the Python engine exactly
+  (a single `material` argument, `FeaturePair.fit_type` per pair), not
+  a per-pair material choice that the Python side never supported
+  either.
+- **Calibration in `localStorage`, not a platform capability** — it's
+  purely a per-viewer convenience (this printer's measured bias) with
+  no reason to be shared between viewers or read back by Claude, which
+  is exactly the `artifact-capabilities` skill's guidance for when
+  browser storage is the right call over `db`.
+- **ZIP over trying multiple download calls** — the `downloads`
+  capability's extension allowlist doesn't include `.stl`, and there's
+  no way to offer "download these 3 files" as three separate prompts
+  without asking the viewer to accept a download prompt per file; one
+  zip with everything (parts + report) is both the only way and the
+  more usable one.
+
 ## Next up (Web track)
 
-W1 is now confirmed working in a real browser on a real user file (see
-above) — the foundation W2+ would build on is no longer unverified.
-
-Phase W2 — feature detection in JS: port the segmentation (dihedral-angle
-region growing) and cylinder/plane classification approach from
-`interlock3d/core/feature_detection.py`, without a RANSAC library
-(browser has no `pyransac3d` equivalent readily available under the same
-CDN constraints described above) — likely a direct least-squares or
-simple-RANSAC implementation written by hand, same reasoning as W1's
-renderer. **Waiting for go-ahead before starting.**
+All seven planned phases are done. Nothing is blocking; possible future
+directions (not started, not decided) would be things the Python app
+doesn't have either: a size-ladder calibration part instead of one
+fixed size, per-pair material overrides, or a saved-project format
+(the web build currently has no "save your session" beyond what's
+already exported) — none requested yet.
