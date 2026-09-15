@@ -45,6 +45,11 @@ This repo is being built in phases — see `PROGRESS.md` for current status.
   export from then on (persisted to `~/.interlock3d/calibration.json`,
   so it survives restarts). **Clear Calibration** reverts to the generic
   defaults.
+- **Phase 8** (packaging): done for Linux (built, launched, and loaded a
+  real STL through the actual file dialog — see `packaging/`), set up to
+  build for Windows and Mac too, but **not yet validated on those two
+  platforms** since this dev environment is Linux-only and PyInstaller
+  doesn't cross-compile. See `packaging/README.md`.
 
 ## Project layout
 
@@ -282,8 +287,27 @@ profile = compute_calibration_profile(
 print(profile.hole_radius_bias_mm, profile.peg_radius_bias_mm)
 ```
 
+## Packaging (Phase 8)
+
+```bash
+cd packaging
+pip install pyinstaller   # or: pip install -e ".[build]" from the project root
+pyinstaller Interlock3D.spec
+```
+
+Produces `dist/Interlock3D/Interlock3D.exe` (Windows), `dist/Interlock3D.app`
+(macOS), or `dist/Interlock3D/Interlock3D` (Linux) — **built separately on
+each OS**, since PyInstaller doesn't cross-compile. Full instructions,
+known caveats (unsigned-binary warnings, a debugging tip for a blank
+startup), and what's been validated so far are in `packaging/README.md`.
+`packaging/smoke_test.sh` re-runs the same launch-and-load-an-STL check
+this session used to validate the Linux build (driven via real X11
+input events, not a test hook — specifically exercises VTK's shader
+loading from inside the frozen bundle, a common PyInstaller+VTK trouble
+spot).
+
 ## Roadmap
 
-See the phase list in `PROGRESS.md`. **Phases 1-7 are all done** — Phase
-8 (packaging into a standalone Windows/Mac executable) is next. Pending
-go-ahead.
+See the phase list in `PROGRESS.md`. **All 8 phases are done** for
+Linux; Windows and Mac builds still need validating on those platforms
+directly (not possible from this Linux dev environment).

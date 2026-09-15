@@ -11,7 +11,7 @@
 | 5 | Geometry modification | **Done** |
 | 6 | Export & report | **Done** |
 | 7 | Calibration wizard (v1.1) | **Done** |
-| 8 | Packaging | Not started |
+| 8 | Packaging | **Done for Linux; Windows/Mac unvalidated** |
 
 ## Phase 1 — Scaffold + load & view STL
 
@@ -955,9 +955,139 @@ it as a lighter-weight add-on.
   them. Confirmed directly — checked `~/.interlock3d/` doesn't exist
   after running the full suite.
 
+## Phase 8 — Packaging
+
+**Done for Linux; Windows and Mac still need validating on those
+platforms.** This is a genuine, structural limitation of this dev
+environment (a Linux container), not something worked around — surfacing
+it clearly rather than claiming full completion.
+
+### What was built
+
+- `packaging/Interlock3D.spec`: a version-controlled PyInstaller spec
+  (not a one-off CLI command) that:
+  - Bundles `data/compensation_profiles.json` explicitly via `datas=`.
+    **This was not optional** — see the bug below.
+  - Picks up `packaging/icon.ico` (Windows) or `packaging/icon.icns`
+    (macOS) automatically if present, no changes needed; falls back to
+    no icon if absent (neither is included — cosmetic, out of scope
+    unless requested).
+  - Builds a `.app` bundle via `BUNDLE(...)` on macOS specifically
+    (`sys.platform == "darwin"`), a folder-plus-executable layout on
+    Windows/Linux (PyInstaller's normal `--onedir`-equivalent output).
+  - Uses `SPECPATH` (PyInstaller's injected global) to resolve the
+    project root, so it works regardless of the invoking working
+    directory rather than assuming one.
+- `packaging/README.md`: build steps, the cross-compilation limitation
+  stated up front, expected output size (~800MB-1GB — normal for a
+  VTK-based app, not a packaging mistake), and troubleshooting tips
+  (temporarily flip `console=True` to see a startup crash's traceback,
+  since the shipped `console=False` build has no visible console at all;
+  expected unsigned-binary warnings on both Windows SmartScreen and macOS
+  Gatekeeper, with code-signing explicitly named as future/separate work
+  rather than silently promised).
+- `packaging/smoke_test.sh`: automates the actual validation this phase
+  ran (below) so it's re-runnable after any future build, not just
+  something done once by hand. Not added to the regular `pytest` suite —
+  packaging builds take minutes and produce ~1GB of output, which doesn't
+  belong in a fast, frequently-run test suite the way the rest of this
+  project's tests do.
+- `pyproject.toml`: added a `[project.optional-dependencies] build =
+  ["pyinstaller>=6.0"]` group (separate from `dev`/pytest, since testing
+  and packaging are different concerns with different audiences — a
+  contributor running the test suite doesn't need PyInstaller).
+
+### A real bug found immediately, by actually running the build
+
+A first, naive `pyinstaller main.py` (no spec file) built "successfully"
+with no errors — but **crashed on startup** with
+`FileNotFoundError: compensation_profiles.json`. PyInstaller has no
+awareness of `pyproject.toml`'s `[tool.setuptools.package-data]`
+declaration (that's a `pip install`/wheel-building concept, not
+something PyInstaller reads), so the JSON data file silently wasn't
+bundled at all despite the bundle otherwise looking complete. Confirmed
+by actually launching the built executable under Xvfb and watching it
+crash with that exact traceback, not just inspecting the build log.
+Fixed by adding an explicit `datas=[...]` entry, then re-verified the
+file is present in the bundle and the app launches successfully. This is
+exactly the kind of thing that "the build completed without errors"
+would never have caught — PyInstaller considers a missing runtime data
+file a complete non-issue at build time.
+
+### Validation
+
+A packaging step doesn't change any application logic — everything
+Phases 1-7 validated about *correctness* still holds. What's specific to
+this phase is: does the exact same code actually run once frozen,
+outside the dev venv, with all its native dependencies (Qt, VTK, OpenGL)
+bundled? That's genuinely a different question (PyInstaller + VTK is a
+commonly cited rough combination in the community, and the missing-JSON
+bug above is a direct example of "looks fine at build time, breaks at
+run time"), so it got real validation rather than being assumed to work
+because the earlier phases did:
+
+1. Built via `Interlock3D.spec` on this Linux container (only platform
+   available here).
+2. Launched the resulting executable under Xvfb — confirmed the full
+   toolbar renders correctly (Material picker, Export, Calibrate
+   Printer, Clear Calibration, and the calibration status label all
+   present and showing the correct "none (generic defaults)" state for
+   a fresh run).
+3. **Drove the actual "Open STL(s)..." file dialog with real X11 input
+   events** (`xdotool` — mouse click on the real button coordinates,
+   keyboard input into the real dialog, not a test hook or any code path
+   unavailable in the shipped binary) to load a real STL file into the
+   frozen app.
+4. Confirmed via screenshot: the mesh rendered correctly (a disk with a
+   through-hole, both surfaces in the correct feature-type colors),
+   feature detection ran and reported the correct count in the status
+   bar ("4 candidate features detected"), and the part list updated
+   correctly — this specifically exercises VTK's shader/rendering-
+   resource loading from inside the frozen bundle, which is the part of
+   a PyInstaller+VTK build most likely to break silently or behave
+   differently than in a dev venv.
+5. Re-ran the whole procedure a second time via `packaging/smoke_test.sh`
+   (built fresh from a clean `packaging/build`+`dist`, not reusing
+   artifacts) to confirm the result reproduces, not a one-off fluke.
+
+**Not done, and flagged rather than assumed**: no Windows or macOS build
+has been produced or tested at all. This container is Linux-only;
+PyInstaller cannot cross-compile, so producing and validating those
+requires actually running `pyinstaller Interlock3D.spec` on a Windows
+machine and a Mac. The spec file is written to be platform-generic (the
+`sys.platform` branches for icon paths and the `BUNDLE` step are already
+in place), so there's no known reason it wouldn't work the same way —
+but "should work" and "validated" are different claims, and only the
+Linux one has actually been tested.
+
+### Key decisions and why
+
+- **A committed `.spec` file, not a documented CLI command.** A build
+  command with several flags (`--windowed`, `--add-data` with
+  OS-specific path-separator syntax, etc.) is exactly the kind of thing
+  that silently drifts from what's documented, or breaks on one OS
+  because of the `:`/`;` separator difference in `--add-data`. A `.spec`
+  file is real Python, runs identically however it's invoked, and is
+  version-controlled — the missing-JSON bug is precisely the kind of
+  regression a committed, working spec file prevents from recurring.
+- **Build artifacts (`packaging/build/`, `packaging/dist/`) are
+  gitignored, not committed.** ~1GB of regeneratable binary output
+  doesn't belong in version control; already covered by the existing
+  `build/`/`dist/` gitignore patterns (confirmed via `git status
+  --ignored` rather than assumed).
+- **`smoke_test.sh` as a standalone script, not a pytest test.**
+  Consistent with why `validate_phase2.py` and `validate_phase5.py`
+  are standalone scripts rather than folded into the main suite: this
+  is a slow (minutes), heavy (~1GB), environment-specific (needs
+  Xvfb+xdotool+ImageMagick on Linux) check that doesn't belong running
+  on every `pytest` invocation the way the fast unit/integration tests
+  do.
+
 ## Next up
 
-**Phases 1-7 are complete** — the full MVP plus the Pro-tier calibration
-differentiator. Phase 8 (packaging into a standalone Windows/Mac
-executable via PyInstaller) is the last phase on the roadmap.
-**Waiting for go-ahead before starting Phase 8.**
+**All 8 phases are done for Linux.** Nothing else is planned unless you
+want: (a) the Windows/Mac builds actually produced and tested (needs
+those platforms directly), (b) an app icon, (c) code-signing for
+distribution (a separate, paid-certificate process on both platforms),
+or (d) something new. This file will be updated once any of those
+happen.
