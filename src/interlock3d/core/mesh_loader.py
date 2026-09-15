@@ -39,3 +39,22 @@ def trimesh_to_pyvista(mesh: trimesh.Trimesh) -> pv.PolyData:
         (np.full((triangle_count, 1), 3, dtype=np.int64), mesh.faces)
     ).astype(np.int64)
     return pv.PolyData(mesh.vertices, faces)
+
+
+def feature_overlay_polydata(mesh: trimesh.Trimesh, face_indices: np.ndarray, offset: float) -> pv.PolyData:
+    """Build a small standalone PolyData for just the given faces, pushed
+    outward along vertex normals by `offset`.
+
+    Used to render a highlight over a detected feature without it
+    z-fighting against the part's own surface at the exact same
+    coordinates (the highlight is a separate actor occupying the same
+    geometry, so without an offset the two flicker for depth priority).
+    """
+    sub_faces = mesh.faces[face_indices]
+    vertex_indices, remapped = np.unique(sub_faces, return_inverse=True)
+    verts = mesh.vertices[vertex_indices] + mesh.vertex_normals[vertex_indices] * offset
+    new_faces = remapped.reshape(sub_faces.shape)
+    pv_faces = np.hstack(
+        (np.full((len(new_faces), 1), 3, dtype=np.int64), new_faces)
+    ).astype(np.int64)
+    return pv.PolyData(verts, pv_faces)

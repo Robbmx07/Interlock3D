@@ -95,6 +95,20 @@ def detect_features(mesh: trimesh.Trimesh, config: DetectionConfig | None = None
     return features
 
 
+def feature_id_per_face(mesh: trimesh.Trimesh, features: list[Feature]) -> np.ndarray:
+    """Map every face of `mesh` to the index of the feature it belongs to
+    in `features`, or -1 if it isn't part of any detected feature.
+
+    Used to attach a pickable per-face lookup to a rendered mesh, so a GUI
+    click on a face can be resolved straight to a `Feature` without a
+    separate spatial search.
+    """
+    ids = np.full(len(mesh.faces), -1, dtype=np.int64)
+    for idx, feature in enumerate(features):
+        ids[feature.face_indices] = idx
+    return ids
+
+
 def _classify_patch(
     mesh: trimesh.Trimesh, face_indices: np.ndarray, area: float, config: DetectionConfig
 ) -> Feature | None:

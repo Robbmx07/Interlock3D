@@ -6,7 +6,7 @@
 |---|---|---|
 | 1 | Scaffold + load & view STL | **Done** |
 | 2 | Feature detection engine | **Done** |
-| 3 | Feature pairing UI | Not started |
+| 3 | Feature pairing UI | **Done** |
 | 4 | Compensation engine | Not started |
 | 5 | Geometry modification | Not started |
 | 6 | Export & report | Not started |
@@ -257,9 +257,151 @@ flagging per the working agreement:**
 - `min_inlier_ratio` and `min_arc_degrees` defaults are reasonable guesses,
   not empirically tuned against real (non-synthetic) STLs yet.
 
+## Phase 3 — Feature pairing UI
+
+**Done.**
+
+### What was built
+
+- **Picking wired to detected features, not just meshes.** Every part's
+  `pyvista.PolyData` carries two custom per-cell arrays —
+  `interlock3d_part_id` and `interlock3d_feature_id` (from
+  `feature_detection.feature_id_per_face`, -1 where a face isn't part of
+  any detected feature) — set once at `viewer.add_part()`. A click
+  resolves straight to `(part_name, feature_index)` by reading those
+  arrays at the picked cell id, with no separate spatial lookup needed.
+- **Highlight overlays.** Every detected feature gets its own small
+  overlay mesh (`mesh_loader.feature_overlay_polydata`): just that
+  feature's faces, re-triangulated and pushed outward slightly along
+  vertex normals (an offset scaled to the part's size) so it doesn't
+  z-fight against the part's own surface at the same coordinates. Default
+  tint by type (red=hole, green=peg, light blue=flat, low opacity since
+  flats can cover most of a part's surface); recolored to yellow while
+  pending selection, and to one of 8 cycling pair colors once confirmed —
+  both features in a pair share the exact same color so the connection
+  reads visually, not just from the pairs list.
+- **Pairing state machine** in `MainWindow`: click a feature to select it
+  (pending); click a second feature on a *different* part to open a
+  fit-type dialog (press/sliding/clearance) and confirm the pair; click
+  the same feature again to deselect; click a second feature on the
+  *same* part, or one that's already paired, and it's rejected with a
+  status-bar message rather than silently ignored or silently pairing
+  something wrong.
+- **Pairs list** in the side panel, each row a plain-language label
+  (`part_a:type <-> part_b:type (Fit label)`); **Remove Pair** reverts
+  both features to their default color, **Change Fit Type...** reopens
+  the same dialog pre-filled with the pair's current choice.
+- `core/pairing.py`: `FeatureRef` (part name + feature index) and
+  `FeaturePair` (two refs + fit type) — deliberately just data, no
+  behavior, so Phase 4's compensation engine can consume a pair list
+  without depending on any GUI code.
+
+### A real bug the validation caught
+
+Built a headless test that drives an actual `vtkCellPicker` at real
+screen coordinates (not just calling our Python callback directly) and
+found that PyVista's higher-level `enable_element_picking` resolves the
+picked cell via `mesh.find_containing_cell(picked_point)` — which
+returned **-1 for a point the picker itself had just correctly hit**, a
+few lines earlier in the same call. `find_containing_cell` is built for
+volumetric cells; treating "is this 3D point inside a zero-thickness
+surface triangle" as a containment test is degenerate and unreliable.
+Had I only tested by calling our own `_on_picked` callback directly (the
+easier, more tempting test to write), this would never have surfaced —
+that only tests our downstream logic, not whether a real click would
+even reach it. **Every real mouse click in the shipped app would have
+silently failed to select anything.**
+
+Fixed by dropping down one layer: `enable_surface_point_picking(...,
+use_picker=True)` still gives PyVista's own click-vs-drag disambiguation
+(so click-to-select and click-drag-to-rotate coexist correctly) and its
+own `vtkCellPicker` invocation, but the callback reads `picker.GetCellId()`
+directly instead of going through the buggy `get_cell()` path. Documented
+inline in `viewer.py` so this doesn't get "simplified" back to the
+higher-level call later.
+
+### Validation
+
+- `tests/test_pairing_gui.py`: 6 pytest cases, all driven through a real
+  `vtkCellPicker.Pick()` call at screen coordinates computed by
+  projecting an actual visible point on the target feature's surface
+  (not the feature's abstract `.center` — for a cylinder that's an axis
+  point, which for a concave hole isn't even on the mesh surface, and
+  picking it would fail for reasons having nothing to do with our code).
+  Covers: default overlay colors, click-to-select highlighting,
+  click-again-to-deselect, cross-part pairing through the real dialog,
+  color-revert on pair removal, and same-part second click being
+  rejected without creating a bad pair.
+- Confirmed via `xvfb-run pytest`: **18/18 passed** (12 from Phase 2 +
+  6 new). Confirmed the 6 new ones skip cleanly (not crash) when no
+  display is available — see the "known limitation" note below on why
+  that needed an explicit guard.
+- Visual confirmation via screenshot: default red/green/blue overlays,
+  yellow "selected" highlight, and a shared pair color across two
+  different parts' features, all rendered correctly.
+
+### Key decisions and why
+
+- **Per-cell `part_id`/`feature_id` arrays instead of actor-identity
+  matching.** PyVista/VTK's picker gives you a dataset + cell id, not
+  automatically "which of my named actors was this." Attaching our own
+  lookup data directly to the mesh (which survives cell extraction during
+  picking, confirmed empirically) sidesteps needing to reverse-map actors
+  to parts by object identity or name-string parsing.
+- **Overlay meshes built in `core/` (trimesh-based), not by asking
+  PyVista to recompute normals on an extracted submesh.** An extracted
+  patch usually isn't a closed manifold on its own, so PyVista's
+  normal-auto-orientation on it isn't reliable. The full source mesh's
+  `vertex_normals` (computed once, correctly, by trimesh) are reliable
+  and require no submesh-specific reasoning — pass them straight into a
+  small standalone `pv.PolyData`.
+- **Pairs disallow same-part-to-same-part and re-pairing an
+  already-paired feature**, both surfaced via status-bar message rather
+  than silently doing nothing or silently allowing it. Reasonable
+  defaults, not the only valid design — flagging per the working
+  agreement:
+  - *Same-part pairing disallowed*: mating features are, by definition,
+    on two different physical parts that get printed separately and
+    assembled — pairing two features on the same STL wouldn't correspond
+    to anything printable. If a future use case needs it (e.g. a single
+    STL containing multiple loose parts), this would need revisiting.
+  - *One pair per feature*: simpler mental model (each hole/peg mates
+    with exactly one thing), matches how these fits work physically in
+    the vast majority of cases. A feature that genuinely needs multiple
+    simultaneous mates (unusual) isn't supported — would need an explicit
+    decision to relax this later, not a silent one.
+
+### Known limitation (surfaced, not silently patched around)
+
+**Overlapping parts aren't auto-arranged.** Loaded STL files render at
+whatever coordinates they were modeled at — if two part files were both
+designed around their own local origin (common for separately-exported
+CAD components), they can load directly on top of each other, making
+their features hard or impossible to click until the user manually
+separates them (there's no pan/nudge-part tool yet — only camera
+rotate/pan/zoom). Worth revisiting once real multi-part assemblies are
+being tested rather than the synthetic single-feature fixtures used here
+(the pairing test itself hits this: `boss_cylinder.stl` and
+`plate_with_hole.stl` overlap as-is, so the test offsets one before
+loading — see `tests/test_pairing_gui.py`'s `two_part_window` fixture).
+**Open question for you:** should a later phase auto-arrange
+("explode view") newly loaded parts side-by-side, or is manual
+camera/part positioning an acceptable MVP workflow? Not implemented
+either way — flagging rather than guessing.
+
+**`QApplication()` aborts the whole process (not a catchable exception)
+when no display/platform plugin is available at all.** Affects test
+infrastructure, not the app itself: `tests/test_pairing_gui.py` checks
+for `DISPLAY`/`WAYLAND_DISPLAY`/`QT_QPA_PLATFORM` *before* importing Qt
+at all and skips cleanly if none are set, because a `try/except` around
+the constructor doesn't help — a fatal Qt abort isn't a Python exception.
+Confirmed both paths: clean skip with no display, full pass under
+`xvfb-run`.
+
 ## Next up
 
-Phase 3 — feature pairing UI: extend the Phase 1 viewer so detected
-features are visibly highlighted and clickable, let the user click a
-feature on Part A then the corresponding one on Part B, confirm a pair,
-and pick a fit type. **Waiting for go-ahead before starting.**
+Phase 4 — compensation engine: a config-driven lookup table of
+clearance/interference values by material and fit type, computing the
+actual per-pair offset to apply. `core/pairing.FeaturePair` (part +
+feature + fit type) is already the shape Phase 4 needs to consume.
+**Waiting for go-ahead before starting.**
